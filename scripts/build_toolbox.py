@@ -34,7 +34,7 @@ def _strip_package_imports(source: str) -> str:
     return "".join(lines)
 
 
-def bundle_source(entry: str = "resolve") -> str:
+def bundle_source() -> str:
     """One script stored inside the .atbx, so Pro does not look for an external file."""
     parts = [
         "# SPDX-License-Identifier: GPL-2.0-or-later\n",
@@ -51,9 +51,8 @@ def bundle_source(entry: str = "resolve") -> str:
     ):
         parts.append(_strip_package_imports((PACKAGE / name).read_text(encoding="utf-8")))
         parts.append("\n")
-    caller = "execute_review_dangles" if entry == "review" else "execute_resolve_dangles"
     parts.append(
-        f'''
+        '''
 def _flag(value, default):
     if value is None:
         return default
@@ -65,20 +64,22 @@ def _flag(value, default):
 def main():
     import arcpy
 
-    in_features = arcpy.GetParameterAsText(0)
-    tolerance = arcpy.GetParameterAsText(1)
-    fix_undershoots = _flag(arcpy.GetParameter(2), True)
-    fix_overshoots = _flag(arcpy.GetParameter(3), True)
-    out_features = arcpy.GetParameterAsText(4)
-    result = {caller}(
+    mode = arcpy.GetParameterAsText(0)
+    in_features = arcpy.GetParameterAsText(1)
+    tolerance = arcpy.GetParameterAsText(2)
+    fix_undershoots = _flag(arcpy.GetParameter(3), True)
+    fix_overshoots = _flag(arcpy.GetParameter(4), True)
+    out_features = arcpy.GetParameterAsText(5)
+    runner = execute_review_dangles if is_review_mode(mode) else execute_resolve_dangles
+    result = runner(
         in_features,
         out_features,
         tolerance,
         fix_undershoots,
         fix_overshoots,
     )
-    arcpy.SetParameter(5, int(result.extended))
-    arcpy.SetParameter(6, int(result.trimmed))
+    arcpy.SetParameter(6, int(result.extended))
+    arcpy.SetParameter(7, int(result.trimmed))
 
 
 if __name__ == "__main__":
@@ -101,7 +102,20 @@ def build() -> Path:
         FeatureLayerParameter,
         LinearUnitParameter,
         LongParameter,
+        StringParameter,
+        StringValueFilter,
     )
+
+    mode = StringParameter(
+        label="Mode",
+        name="mode",
+        description=(
+            "Automatic applies every correction. "
+            "Review moves the map to each dangling end: Enter accepts, Space rejects."
+        ),
+        default_value="Automatic",
+    )
+    mode.filter = StringValueFilter(["Automatic", "Review"])
 
     lines = FeatureLayerParameter(
         label="Input line layer",
@@ -157,12 +171,14 @@ def build() -> Path:
         name=TOOL_NAME,
         label="Resolve dangles (extend / trim)",
         description=(
-            "Extends undershoots along their own direction and trims overshoots "
-            "back to the nearest crossing, within one tolerance."
+            "Automatic applies every correction. Review moves the map to each "
+            "dangling end: Enter accepts, Space rejects."
         ),
         summary=(
-            "<p>Cleans dangling ends of a line network. Attributes are kept and "
-            "lines are not split.</p>"
+            "<p><b>Automatic</b> applies every correction inside the tolerance.</p>"
+            "<p><b>Review</b> moves the map to each dangling end. "
+            "Enter accepts that correction. Space leaves the end unchanged. "
+            "Escape cancels and writes nothing. Run Review in the foreground.</p>"
             "<p><b>Undershoot:</b> a free end that stops short of another line is "
             "extended along its own direction until it reaches that line, when the "
             "gap is within the tolerance.</p>"
@@ -171,93 +187,15 @@ def build() -> Path:
             "that end.</p>"
         ),
     )
-    for parameter in (lines, tolerance, extend, trim, output, extended, trimmed):
+    for parameter in (mode, lines, tolerance, extend, trim, output, extended, trimmed):
         tool.add_parameter(parameter)
-    tool.execution_script = ExecutionScript.from_code(bundle_source("resolve"))
+    tool.execution_script = ExecutionScript.from_code(bundle_source())
     tool.validation_script = ValidationScript.from_file(
-        ROOT / "scripts" / "validate_resolve_dangles.py"
-    )
-
-    review = ScriptTool(
-        name="ReviewDangles",
-        label="Review dangles (tick / reject)",
-        description=(
-            "Moves the map to each dangling end. A green tick autocorrects it. "
-            "A red cross leaves that end unchanged."
-        ),
-        summary=(
-            "<p>Steps through every undershoot and overshoot inside the tolerance. "
-            "The map zooms to the error.</p>"
-            "<p><b>Green tick, Autocorrect:</b> extend or trim that end.</p>"
-            "<p><b>Red cross, Reject:</b> leave that end as it is.</p>"
-            "<p>Run this tool in the foreground so the map can move.</p>"
-        ),
-    )
-    review_lines = FeatureLayerParameter(
-        label="Input line layer",
-        name="in_features",
-        description="Polyline layer whose dangling ends will be reviewed.",
-    )
-    review_lines.filter = FeatureClassTypeFilter(GeometryType.POLYLINE)
-    review_tolerance = LinearUnitParameter(
-        label="Tolerance (max gap to close / tail to trim)",
-        name="tolerance",
-        description=(
-            "Maximum gap to close, or tail to cut, in ground metres. "
-            "On EPSG:4326 this is metres, not degrees."
-        ),
-        default_value=LinearUnitValue(value=0, unit=LinearUnit.METERS),
-    )
-    review_tolerance.dependency = review_lines
-    review_extend = BooleanParameter(
-        label="Extend undershoots",
-        name="fix_undershoots",
-        description="Offer to extend a free end along its own direction.",
-        default_value=True,
-    )
-    review_trim = BooleanParameter(
-        label="Trim overshoots",
-        name="fix_overshoots",
-        description="Offer to cut a free end back to the nearest crossing.",
-        default_value=True,
-    )
-    review_output = FeatureClassParameter(
-        label="Resolved lines",
-        name="out_features",
-        description="New polyline feature class. Rejected ends are copied unchanged.",
-        is_input=False,
-    )
-    review_output.filter = FeatureClassTypeFilter(GeometryType.POLYLINE)
-    review_extended = LongParameter(
-        label="Ends extended",
-        name="extended_count",
-        is_input=False,
-        is_required=None,
-    )
-    review_trimmed = LongParameter(
-        label="Ends trimmed",
-        name="trimmed_count",
-        is_input=False,
-        is_required=None,
-    )
-    for parameter in (
-        review_lines,
-        review_tolerance,
-        review_extend,
-        review_trim,
-        review_output,
-        review_extended,
-        review_trimmed,
-    ):
-        review.add_parameter(parameter)
-    review.execution_script = ExecutionScript.from_code(bundle_source("review"))
-    review.validation_script = ValidationScript.from_file(
         ROOT / "scripts" / "validate_resolve_dangles.py"
     )
 
     toolset = Toolset(name="Topology")
     toolset.add_script_tool(tool)
-    toolset.add_script_tool(review)
     toolbox = Toolbox(
         name="NetworkTopology",
         label="Network Topology",

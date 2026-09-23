@@ -18,9 +18,9 @@ class ArcToolboxTests(unittest.TestCase):
             resources = json.loads(archive.read("toolbox.content.rc"))
             tool = json.loads(archive.read("ResolveDangles.tool/tool.content"))
             script = archive.read("ResolveDangles.tool/tool.script.execute.py").decode()
-            review_script = archive.read("ReviewDangles.tool/tool.script.execute.py").decode()
             self.assertNotIn("ResolveDangles.tool/tool.script.execute.link", names)
             self.assertIn("ResolveDangles.tool/tool.script.validate.py", names)
+            self.assertNotIn("ReviewDangles.tool/tool.content", names)
 
         self.assertEqual(toolbox["alias"], "networktopology")
         self.assertEqual(toolbox["version"], "1.0")
@@ -28,18 +28,17 @@ class ArcToolboxTests(unittest.TestCase):
         self.assertEqual(resources["map"]["toolset1.name"], "Topology")
         self.assertEqual(
             toolbox["toolsets"]["$rc:toolset1.name"]["tools"],
-            ["ResolveDangles", "ReviewDangles"],
+            ["ResolveDangles"],
         )
-        self.assertNotIn("ReviewDangles.tool/tool.script.execute.link", names)
-        self.assertIn("Autocorrect", review_script)
-        self.assertIn("execute_review_dangles", review_script)
-        compile(review_script, "review.tool.script.execute.py", "exec")
+        self.assertIn("is_review_mode", script)
+        self.assertIn("execute_review_dangles", script)
         self.assertIn("<root>", toolbox["toolsets"])
 
         self.assertEqual(tool["type"], "ScriptTool")
         self.assertEqual(
             list(tool["params"]),
             [
+                "mode",
                 "in_features",
                 "tolerance",
                 "fix_undershoots",
@@ -49,6 +48,8 @@ class ArcToolboxTests(unittest.TestCase):
                 "trimmed_count",
             ],
         )
+        self.assertEqual(tool["params"]["mode"]["datatype"]["type"], "GPString")
+        self.assertEqual(tool["params"]["mode"]["value"], "Automatic")
         self.assertEqual(tool["params"]["in_features"]["datatype"]["type"], "GPFeatureLayer")
         self.assertEqual(
             tool["params"]["in_features"]["domain"]["geometrytype"],

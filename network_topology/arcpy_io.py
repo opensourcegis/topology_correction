@@ -300,6 +300,13 @@ def _zoom_to_correction(correction: Correction, spatial_ref, state: dict) -> str
     with arcpy.da.InsertCursor(fc, ["SHAPE@"]) as cursor:
         cursor.insertRow([geometry])
 
+    kind = "Undershoot" if correction.kind == "undershoot" else "Overshoot"
+    end = "start" if correction.at_start else "end"
+    arcpy.AddMessage(
+        f"{kind}, feature {correction.feature_index + 1}, {end}. "
+        f"Enter accepts, Space rejects."
+    )
+
     minx, miny, maxx, maxy = _correction_extent(correction)
     try:
         extent = arcpy.Extent(minx, miny, maxx, maxy, spatial_reference=spatial_ref)
@@ -344,7 +351,7 @@ def execute_review_dangles(
     fix_undershoots: bool,
     fix_overshoots: bool,
 ) -> ResolveResult:
-    """Zoom to each dangling end. Tick autocorrects it. Cross leaves it unchanged."""
+    """Zoom to each dangling end. Enter accepts it. Space leaves it unchanged."""
     import arcpy
 
     desc = arcpy.Describe(in_features)
@@ -431,7 +438,7 @@ def execute_review_dangles(
             written += 1
 
     arcpy.AddMessage(
-        f"Autocorrected {sum(1 for flag in accepted_flags if flag)}, "
+        f"Accepted {sum(1 for flag in accepted_flags if flag)}, "
         f"rejected {rejected}. "
         f"{result.extended} ends extended, {result.trimmed} ends trimmed. "
         f"{written} features written."

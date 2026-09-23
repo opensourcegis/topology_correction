@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
-"""Show each dangling end and ask for a green tick or a red cross.
+"""Step through each dangling end while the map stays on that error.
 
-Autocorrect applies that one correction. Reject leaves the end as it is.
-The caller can move the map to the error before the window is shown.
+Enter accepts the correction. Space rejects it and leaves the end unchanged.
+Escape cancels the whole review and writes nothing.
 """
 
 from __future__ import annotations
@@ -94,6 +94,19 @@ _PAPER = (244, 246, 245)
 _LINE = (55, 68, 80)
 _CONTEXT = (176, 184, 190)
 _TAIL = (214, 96, 96)
+
+
+def decision_for_key(keysym: str) -> bool | None:
+    """Enter accepts. Space rejects. Any other key is ignored."""
+    if keysym in ("Return", "KP_Enter"):
+        return True
+    if keysym == "space":
+        return False
+    return None
+
+
+def is_review_mode(mode: str | None) -> bool:
+    return str(mode or "").strip().lower() == "review"
 
 
 def collect_corrections(features, tolerance: float, **kwargs) -> list[Correction]:
@@ -251,7 +264,7 @@ def render_review_png(
     ax, ay = xy(anchor)
     _circle(pixels, width, height, ax, ay, 7, (232, 122, 26))
 
-    _button(pixels, width, height, 36, 524, 450, 612, _GREEN, "tick", "Autocorrect")
+    _button(pixels, width, height, 36, 524, 450, 612, _GREEN, "tick", "Accept")
     _button(pixels, width, height, 510, 524, 924, 612, _RED, "cross", "Reject")
     return _png(width, height, pixels)
 
@@ -315,7 +328,7 @@ def review_corrections(
     on_show: Callable[[Correction], str | None] | None = None,
     unit: str = "",
 ) -> list[bool] | None:
-    """Ask about each error. True means autocorrect. None means the window was closed."""
+    """Visit each error. True accepts it. None means the review was cancelled."""
     if not corrections:
         return []
     import os
@@ -325,9 +338,11 @@ def review_corrections(
     answers: list[bool] = []
     cancelled = {"value": False}
     position = {"i": 0}
+    # When the caller moves the map, keep this bar out of the way.
+    map_review = on_show is not None
 
     root = tk.Tk()
-    root.title("Review topological errors")
+    root.title("Review dangles")
     root.configure(bg="#f4f6f5")
     root.resizable(False, False)
     try:
@@ -338,10 +353,19 @@ def review_corrections(
     title = tk.Label(root, bg="#f4f6f5", fg="#202830", font=("Segoe UI", 16, "bold"))
     title.pack(anchor="w", padx=16, pady=(12, 0))
     detail = tk.Label(root, bg="#f4f6f5", fg="#5a6670", font=("Segoe UI", 11))
-    detail.pack(anchor="w", padx=16, pady=(2, 8))
+    detail.pack(anchor="w", padx=16, pady=(2, 4))
+    hint = tk.Label(
+        root,
+        bg="#f4f6f5",
+        fg="#202830",
+        font=("Segoe UI", 11, "bold"),
+        text="Enter accept     Space reject     Esc cancel",
+    )
+    hint.pack(anchor="w", padx=16, pady=(0, 8))
 
     image_label = tk.Label(root, bg="white", bd=0)
-    image_label.pack(padx=16, pady=(0, 12))
+    if not map_review:
+        image_label.pack(padx=16, pady=(0, 12))
     holder: dict[str, tk.PhotoImage] = {}
 
     buttons = tk.Frame(root, bg="#f4f6f5")
@@ -361,40 +385,62 @@ def review_corrections(
             return
         show()
 
+    def on_key(event):
+        if event.keysym == "Escape":
+            close_cancelled()
+            return "break"
+        decision = decision_for_key(event.keysym)
+        if decision is None:
+            return None
+        choose(decision)
+        return "break"
+
     tick = tk.Button(
         buttons,
-        text="\u2713   Autocorrect",
+        text="Accept   Enter",
         command=lambda: choose(True),
         bg="#1b8a3e",
         fg="white",
         activebackground="#146c30",
         activeforeground="white",
-        font=("Segoe UI", 18, "bold"),
+        font=("Segoe UI", 14, "bold"),
         relief="flat",
         bd=0,
-        padx=28,
-        pady=14,
+        padx=18,
+        pady=10,
         cursor="hand2",
+        takefocus=0,
     )
     tick.pack(side="left", expand=True, fill="x", padx=(0, 8))
     cross = tk.Button(
         buttons,
-        text="\u2717   Reject",
+        text="Reject   Space",
         command=lambda: choose(False),
         bg="#d1242f",
         fg="white",
         activebackground="#a61c25",
         activeforeground="white",
-        font=("Segoe UI", 18, "bold"),
+        font=("Segoe UI", 14, "bold"),
         relief="flat",
         bd=0,
-        padx=28,
-        pady=14,
+        padx=18,
+        pady=10,
         cursor="hand2",
+        takefocus=0,
     )
     cross.pack(side="left", expand=True, fill="x", padx=(8, 0))
-    root.bind("<Return>", lambda _event: choose(True))
-    root.bind("<Escape>", lambda _event: choose(False))
+    root.bind("<Key>", on_key)
+
+    def place_bar():
+        root.update_idletasks()
+        width = max(root.winfo_reqwidth(), 680)
+        height = root.winfo_reqheight()
+        x = max(0, (root.winfo_screenwidth() - width) // 2)
+        if map_review:
+            y = max(0, root.winfo_screenheight() - height - 64)
+        else:
+            y = max(0, (root.winfo_screenheight() - height) // 2)
+        root.geometry(f"{width}x{height}+{x}+{y}")
 
     def show():
         correction = corrections[position["i"]]
@@ -410,32 +456,22 @@ def review_corrections(
         )
         root.withdraw()
         root.update_idletasks()
-        shot = on_show(correction) if on_show else None
-        photo = _load_photo(root, shot)
-        if photo is None:
+        if on_show:
+            on_show(correction)
+        else:
             handle = tempfile.NamedTemporaryFile(suffix=".ppm", delete=False)
             handle.write(_schematic_ppm(correction))
             handle.close()
             try:
-                photo = tk.PhotoImage(file=handle.name)
+                photo = tk.PhotoImage(file=handle.name, master=root)
             finally:
                 os.unlink(handle.name)
-        holder["photo"] = photo
-        image_label.configure(image=photo)
+            holder["photo"] = photo
+            image_label.configure(image=photo)
         root.deiconify()
+        place_bar()
         root.lift()
-
-    def _load_photo(widget, path):
-        if not path:
-            return None
-        try:
-            from PIL import Image, ImageTk
-
-            image = Image.open(path)
-            image.thumbnail((900, 460))
-            return ImageTk.PhotoImage(image, master=widget)
-        except Exception:
-            return None
+        root.focus_force()
 
     show()
     root.mainloop()

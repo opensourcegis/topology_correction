@@ -31,7 +31,7 @@ class Toolbox(object):
     def __init__(self):
         self.label = "Network Topology"
         self.alias = "network_topology"
-        self.tools = [ResolveDangles, ReviewDangles]
+        self.tools = [ResolveDangles]
 
 
 class ResolveDangles(object):
@@ -42,6 +42,9 @@ class ResolveDangles(object):
         self.description = (
             "Cleans dangling ends of a line network and writes one output feature "
             "for each input feature. Attributes are preserved. Lines are not split.\n\n"
+            "Mode Automatic applies every correction.\n"
+            "Mode Review moves the map to each dangling end. Enter accepts that "
+            "correction. Space leaves the end unchanged. Escape cancels and writes nothing.\n\n"
             "Undershoot: a free end that stops short of another line is extended "
             "along its own direction until it reaches that line, when the gap is "
             "within the tolerance.\n\n"
@@ -49,12 +52,24 @@ class ResolveDangles(object):
             "than the tolerance, is cut back to the crossing nearest that end.\n\n"
             "Ends are matched against the input geometry in a single pass. This tool "
             "does not node crossings. Run a planarize or topology-split step afterwards "
-            "when the network must be split at every intersection."
+            "when the network must be split at every intersection. "
+            "Run Review in the foreground so the map can move."
         )
         self.category = "Topology"
         self.canRunInBackground = False
 
     def getParameterInfo(self):
+        mode = arcpy.Parameter(
+            displayName="Mode",
+            name="mode",
+            datatype="GPString",
+            parameterType="Required",
+            direction="Input",
+        )
+        mode.filter.type = "ValueList"
+        mode.filter.list = ["Automatic", "Review"]
+        mode.value = "Automatic"
+
         in_features = arcpy.Parameter(
             displayName="Input line layer",
             name="in_features",
@@ -116,6 +131,7 @@ class ResolveDangles(object):
             direction="Output",
         )
         return [
+            mode,
             in_features,
             tolerance,
             fix_undershoots,
@@ -132,7 +148,7 @@ class ResolveDangles(object):
         return
 
     def updateMessages(self, parameters):
-        tolerance = parameters[1]
+        tolerance = parameters[2]
         if not tolerance.altered or not tolerance.valueAsText:
             return
         pieces = str(tolerance.valueAsText).split()
@@ -145,50 +161,21 @@ class ResolveDangles(object):
             tolerance.setErrorMessage("Tolerance must be greater than or equal to 0.")
 
     def execute(self, parameters, messages):
-        from network_topology.arcpy_io import execute_resolve_dangles
+        from network_topology.arcpy_io import execute_resolve_dangles, execute_review_dangles
+        from network_topology.review_ui import is_review_mode
 
-        result = execute_resolve_dangles(
-            parameters[0].valueAsText,
-            parameters[4].valueAsText,
+        runner = execute_review_dangles if is_review_mode(parameters[0].valueAsText) else execute_resolve_dangles
+        result = runner(
             parameters[1].valueAsText,
-            _as_bool(parameters[2].value, True),
+            parameters[5].valueAsText,
+            parameters[2].valueAsText,
             _as_bool(parameters[3].value, True),
+            _as_bool(parameters[4].value, True),
         )
-        parameters[5].value = int(result.extended)
-        parameters[6].value = int(result.trimmed)
-        arcpy.SetParameter(5, int(result.extended))
-        arcpy.SetParameter(6, int(result.trimmed))
+        parameters[6].value = int(result.extended)
+        parameters[7].value = int(result.trimmed)
+        arcpy.SetParameter(6, int(result.extended))
+        arcpy.SetParameter(7, int(result.trimmed))
 
     def postExecute(self, parameters):
         return
-
-
-class ReviewDangles(ResolveDangles):
-    """Zoom to each dangling end. Tick autocorrects it. Cross leaves it."""
-
-    def __init__(self):
-        super().__init__()
-        self.label = "Review dangles (tick / reject)"
-        self.description = (
-            "Moves the map to each undershoot and overshoot inside the tolerance.\n\n"
-            "Green tick, Autocorrect: extend or trim that end.\n"
-            "Red cross, Reject: leave that end unchanged.\n\n"
-            "Run this tool in the foreground so the map can move. "
-            "Closing the window writes nothing."
-        )
-        self.canRunInBackground = False
-
-    def execute(self, parameters, messages):
-        from network_topology.arcpy_io import execute_review_dangles
-
-        result = execute_review_dangles(
-            parameters[0].valueAsText,
-            parameters[4].valueAsText,
-            parameters[1].valueAsText,
-            _as_bool(parameters[2].value, True),
-            _as_bool(parameters[3].value, True),
-        )
-        parameters[5].value = int(result.extended)
-        parameters[6].value = int(result.trimmed)
-        arcpy.SetParameter(5, int(result.extended))
-        arcpy.SetParameter(6, int(result.trimmed))

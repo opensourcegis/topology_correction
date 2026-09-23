@@ -9,7 +9,13 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from network_topology.dangle_resolver import resolve_dangles
-from network_topology.review_ui import apply_decisions, collect_corrections, render_review_png
+from network_topology.review_ui import (
+    apply_decisions,
+    collect_corrections,
+    decision_for_key,
+    is_review_mode,
+    render_review_png,
+)
 
 
 def feature(*coords):
@@ -119,6 +125,18 @@ class ReviewDecisionTests(unittest.TestCase):
         part = result.features[0]["parts"][0]
         self.assertAlmostEqual(part[0].x, 5.0, places=6)
         self.assertAlmostEqual(part[-1].x, 4.7, places=6)
+
+
+class ReviewKeyTests(unittest.TestCase):
+    def test_enter_accepts_and_space_rejects(self):
+        self.assertTrue(decision_for_key("Return"))
+        self.assertTrue(decision_for_key("KP_Enter"))
+        self.assertFalse(decision_for_key("space"))
+        self.assertIsNone(decision_for_key("Escape"))
+        self.assertTrue(is_review_mode("Review"))
+        self.assertTrue(is_review_mode(" review "))
+        self.assertFalse(is_review_mode("Automatic"))
+        self.assertFalse(is_review_mode(None))
 
 
 class ReviewScreenTests(unittest.TestCase):

@@ -15,7 +15,7 @@ class ToolValidator:
         return
 
     def updateMessages(self):
-        tolerance = self.params[1]
+        tolerance = next(param for param in self.params if param.name == "tolerance")
         if not tolerance.altered or not tolerance.valueAsText:
             return
         pieces = str(tolerance.valueAsText).split()

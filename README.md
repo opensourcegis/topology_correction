@@ -73,9 +73,12 @@ In ArcGIS Pro:
 1. Open the **Catalog** pane.
 2. Right-click **Toolboxes** → **Add Toolbox**.
 3. Choose `NetworkTopology.atbx`.
-4. Run **Network Topology → Topology → Resolve dangles (extend / trim)** to fix every end, or **Review dangles (tick / reject)** to look at each one.
+4. Run **Network Topology → Topology → Resolve dangles (extend / trim)**.
 
-**Review dangles** moves the map to every undershoot and overshoot inside the tolerance. **Green tick / Autocorrect** applies that fix. **Red cross / Reject** leaves the end unchanged. Enter accepts, Escape rejects. Closing the window writes nothing. Run it in the foreground so the map can move.
+**Mode** has two choices:
+
+1. **Automatic** applies every correction inside the tolerance.
+2. **Review** moves the map to each dangling end. **Enter** accepts that correction. **Space** leaves the end unchanged. **Escape** cancels and writes nothing. A bar at the bottom of the screen shows which error you are on. Run Review in the foreground so the map can move.
 
 The input layer is not edited. The tool creates a new polyline feature class.
 A selection or definition query on the input is honored. ModelBuilder can
@@ -86,6 +89,7 @@ From the ArcGIS Pro Python window, after the toolbox is added to the project:
 ```python
 arcpy.ImportToolbox(r"C:\GIS\network-topology-arcgis\NetworkTopology.atbx")
 arcpy.networktopology.ResolveDangles(
+    mode="Automatic",
     in_features=r"C:\data\roads.gdb\roads",
     tolerance="1 Meters",
     fix_undershoots=True,
@@ -105,6 +109,7 @@ keeps the distance in ground metres.
 
 | Parameter | Name | Meaning |
 | --- | --- | --- |
+| Mode | `mode` | `Automatic` or `Review` |
 | Input line layer | `in_features` | Polyline layer or feature class |
 | Tolerance | `tolerance` | Max gap to close, or max tail to trim |
 | Extend undershoots | `fix_undershoots` | On by default |

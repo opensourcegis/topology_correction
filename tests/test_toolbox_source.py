@@ -13,6 +13,9 @@ class ToolboxSourceTests(unittest.TestCase):
         self.assertIn("class ResolveDangles", source)
         self.assertIn("fix_undershoots", source)
         self.assertIn("fix_overshoots", source)
+        self.assertIn('"Automatic"', source)
+        self.assertIn('"Review"', source)
+        self.assertNotIn("class ReviewDangles", source)
 
 
 if __name__ == "__main__":
