@@ -8,7 +8,12 @@ Imported only when the toolbox runs inside ArcGIS Pro.
 from __future__ import annotations
 
 from network_topology.dangle_resolver import Correction, ResolveResult, resolve_dangles
-from network_topology.review_ui import apply_decisions, collect_corrections, review_corrections
+from network_topology.review_ui import (
+    apply_decisions,
+    collect_corrections,
+    review_corrections,
+    review_zoom_extent,
+)
 from network_topology.geographic import ellipsoid_axes, mean_latitude
 from network_topology.geometry import Point
 from network_topology.units import is_geographic, tolerance_ground_meters, tolerance_in_xy_units
@@ -238,17 +243,6 @@ def _resolve_loaded(
     )
 
 
-def _correction_extent(correction: Correction):
-    points = list(correction.before) + list(correction.after)
-    for part in correction.context:
-        points.extend(part)
-    xs = [point.x for point in points]
-    ys = [point.y for point in points]
-    span = max(max(xs) - min(xs), max(ys) - min(ys), 1e-9)
-    pad = span * 0.65
-    return min(xs) - pad, min(ys) - pad, max(xs) + pad, max(ys) + pad
-
-
 def _paint_proposed(layer) -> None:
     try:
         symbol = layer.symbology
@@ -280,27 +274,17 @@ def _open_map_view():
 
 
 def _move_map_to_extent(view, extent) -> None:
-    """Pan and zoom the open map to this extent."""
+    """Zoom the open map so this extent fills the view."""
     import arcpy
 
-    moved = False
-    errors = []
-    if hasattr(view, "panToExtent"):
-        try:
-            view.panToExtent(extent)
-            moved = True
-        except Exception as exc:
-            errors.append(exc)
     try:
         camera = view.camera
         camera.setExtent(extent)
         view.camera = camera
-        moved = True
     except Exception as exc:
-        errors.append(exc)
-    if not moved:
-        detail = "; ".join(str(item) for item in errors) or "the map view did not accept the extent"
-        raise arcpy.ExecuteError(f"Could not move the map to this dangling end ({detail}).")
+        raise arcpy.ExecuteError(
+            f"Could not zoom the map to this dangling end ({exc})."
+        ) from exc
 
 
 def _zoom_to_correction(correction: Correction, spatial_ref, state: dict) -> None:
@@ -340,7 +324,7 @@ def _zoom_to_correction(correction: Correction, spatial_ref, state: dict) -> Non
         f"Enter accepts, Space rejects."
     )
 
-    minx, miny, maxx, maxy = _correction_extent(correction)
+    minx, miny, maxx, maxy = review_zoom_extent(correction)
     extent = arcpy.Extent(minx, miny, maxx, maxy, spatial_reference=spatial_ref)
     _move_map_to_extent(view, extent)
 

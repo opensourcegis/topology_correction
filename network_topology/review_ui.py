@@ -96,6 +96,24 @@ _CONTEXT = (176, 184, 190)
 _TAIL = (214, 96, 96)
 
 
+def review_zoom_extent(correction: Correction) -> tuple[float, float, float, float]:
+    """Layer extent centred on the dangling end and the correction.
+
+    The window is a few times the gap. Whole lines that merely pass near the
+    error are left outside the frame so the map does not zoom out to them.
+    """
+    anchor = correction.before[0] if correction.at_start else correction.before[-1]
+    proposed = correction.after[0] if correction.at_start else correction.after[-1]
+    center_x = (anchor.x + proposed.x) / 2.0
+    center_y = (anchor.y + proposed.y) / 2.0
+    gap_xy = ((proposed.x - anchor.x) ** 2 + (proposed.y - anchor.y) ** 2) ** 0.5
+    # The gap occupies about a quarter of the view, with the join in the middle.
+    half = gap_xy * 2.0
+    if half <= 0.0:
+        half = max(abs(center_x), abs(center_y), 1.0) * 1e-8
+    return center_x - half, center_y - half, center_x + half, center_y + half
+
+
 def decision_for_key(keysym: str) -> bool | None:
     """Enter accepts. Space rejects. Any other key is ignored."""
     if keysym in ("Return", "KP_Enter"):

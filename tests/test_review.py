@@ -15,6 +15,7 @@ from network_topology.review_ui import (
     decision_for_key,
     is_review_mode,
     render_review_png,
+    review_zoom_extent,
 )
 
 
@@ -125,6 +126,22 @@ class ReviewDecisionTests(unittest.TestCase):
         part = result.features[0]["parts"][0]
         self.assertAlmostEqual(part[0].x, 5.0, places=6)
         self.assertAlmostEqual(part[-1].x, 4.7, places=6)
+
+
+class ReviewZoomTests(unittest.TestCase):
+    def test_extent_frames_the_gap_and_not_the_whole_line(self):
+        features = [
+            feature((0, 5), (4.6, 5)),
+            feature((5, -5000), (5, 5000)),
+        ]
+        correction = collect_corrections(features, 1.0, fix_overshoots=False)[0]
+        minx, miny, maxx, maxy = review_zoom_extent(correction)
+        self.assertAlmostEqual(minx, 4.0, places=5)
+        self.assertAlmostEqual(maxx, 5.6, places=5)
+        self.assertAlmostEqual(miny, 4.2, places=5)
+        self.assertAlmostEqual(maxy, 5.8, places=5)
+        self.assertLess(maxy, 100.0)
+        self.assertGreater(minx, -1.0)
 
 
 class ReviewKeyTests(unittest.TestCase):
