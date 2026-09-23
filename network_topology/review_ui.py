@@ -96,6 +96,50 @@ _CONTEXT = (176, 184, 190)
 _TAIL = (214, 96, 96)
 
 
+def dedupe_corrections(corrections: Sequence[Correction]) -> list[Correction]:
+    """One prompt per dangling end. The same end must not be asked twice."""
+    unique: list[Correction] = []
+    seen: set[tuple[int, int, bool, str]] = set()
+    for correction in corrections:
+        key = (
+            correction.feature_index,
+            correction.part_in_feature,
+            correction.at_start,
+            correction.kind,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(correction)
+    return unique
+
+
+def highlight_radius(correction: Correction) -> float:
+    """Half-width of the highlight, in layer units, so the end is obvious when zoomed."""
+    anchor = correction.before[0] if correction.at_start else correction.before[-1]
+    proposed = correction.after[0] if correction.at_start else correction.after[-1]
+    gap = ((proposed.x - anchor.x) ** 2 + (proposed.y - anchor.y) ** 2) ** 0.5
+    return max(gap * 0.45, 1e-8)
+
+
+def highlight_band(points: Sequence[Point], radius: float) -> list[Point]:
+    """A box around a segment, wide enough to see at the review zoom."""
+    start, end = points[0], points[1]
+    dx = end.x - start.x
+    dy = end.y - start.y
+    length = (dx * dx + dy * dy) ** 0.5
+    if length == 0.0:
+        dx, dy, length = 1.0, 0.0, 1.0
+    px = -dy / length * radius
+    py = dx / length * radius
+    return [
+        Point(start.x + px, start.y + py),
+        Point(end.x + px, end.y + py),
+        Point(end.x - px, end.y - py),
+        Point(start.x - px, start.y - py),
+    ]
+
+
 def review_highlight(correction: Correction) -> dict[str, Any]:
     """Pieces of one dangling end to draw on the map.
 
@@ -148,6 +192,22 @@ def decision_for_key(keysym: str) -> bool | None:
     return None
 
 
+def claim_choice(state: dict) -> bool:
+    """Accept one answer for the end currently on screen.
+
+    A second key or click for that same end returns False and must not advance.
+    """
+    if state.get("busy"):
+        return False
+    state["busy"] = True
+    return True
+
+
+def release_choice(state: dict) -> None:
+    """Allow the next dangling end to be answered."""
+    state["busy"] = False
+
+
 def is_review_mode(mode: str | None) -> bool:
     return str(mode or "").strip().lower() == "review"
 
@@ -168,7 +228,7 @@ def collect_corrections(features, tolerance: float, **kwargs) -> list[Correction
             not correction.at_start,
         )
     )
-    return found
+    return dedupe_corrections(found)
 
 
 def apply_decisions(features, tolerance: float, corrections: Sequence[Correction], accepted: Sequence[bool], **kwargs):
@@ -428,12 +488,17 @@ def review_corrections(
     root.protocol("WM_DELETE_WINDOW", close_cancelled)
 
     def choose(accept: bool):
+        # Enter and Space can be delivered twice (key plus a focused control).
+        # The second delivery must not move on to the next dangling end.
+        if not claim_choice(position):
+            return
         answers.append(accept)
         position["i"] += 1
         if position["i"] >= len(corrections):
             root.quit()
             return
         show()
+        root.after(300, lambda: release_choice(position))
 
     def on_key(event):
         if event.keysym == "Escape":
@@ -445,41 +510,24 @@ def review_corrections(
         choose(decision)
         return "break"
 
-    tick = tk.Button(
-        buttons,
-        text="Accept   Enter",
-        command=lambda: choose(True),
-        bg="#1b8a3e",
-        fg="white",
-        activebackground="#146c30",
-        activeforeground="white",
-        font=("Segoe UI", 14, "bold"),
-        relief="flat",
-        bd=0,
-        padx=18,
-        pady=10,
-        cursor="hand2",
-        takefocus=0,
-    )
-    tick.pack(side="left", expand=True, fill="x", padx=(0, 8))
-    cross = tk.Button(
-        buttons,
-        text="Reject   Space",
-        command=lambda: choose(False),
-        bg="#d1242f",
-        fg="white",
-        activebackground="#a61c25",
-        activeforeground="white",
-        font=("Segoe UI", 14, "bold"),
-        relief="flat",
-        bd=0,
-        padx=18,
-        pady=10,
-        cursor="hand2",
-        takefocus=0,
-    )
-    cross.pack(side="left", expand=True, fill="x", padx=(8, 0))
-    root.bind("<Key>", on_key)
+    def choice_label(text, color, accept):
+        label = tk.Label(
+            buttons,
+            text=text,
+            bg=color,
+            fg="white",
+            font=("Segoe UI", 14, "bold"),
+            padx=18,
+            pady=10,
+            cursor="hand2",
+        )
+        label.pack(side="left", expand=True, fill="x", padx=(0 if accept else 8, 8 if accept else 0))
+        label.bind("<Button-1>", lambda _event: choose(accept))
+        return label
+
+    choice_label("Accept   Enter", "#1b8a3e", True)
+    choice_label("Reject   Space", "#d1242f", False)
+    root.bind("<KeyPress>", on_key)
 
     def place_bar():
         root.update_idletasks()

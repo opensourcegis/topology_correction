@@ -11,9 +11,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from network_topology.dangle_resolver import resolve_dangles
 from network_topology.review_ui import (
     apply_decisions,
+    claim_choice,
     collect_corrections,
     decision_for_key,
+    dedupe_corrections,
+    highlight_band,
+    highlight_radius,
     is_review_mode,
+    release_choice,
     render_review_png,
     review_highlight,
     review_zoom_extent,
@@ -144,6 +149,11 @@ class ReviewHighlightTests(unittest.TestCase):
         self.assertAlmostEqual(pieces["change"][1].x, 5.0, places=6)
         self.assertAlmostEqual(pieces["anchor"].x, 4.6, places=6)
         self.assertNotAlmostEqual(pieces["dangle"][0].x, 0.0, places=6)
+        radius = highlight_radius(correction)
+        self.assertAlmostEqual(radius, 0.4 * 0.45, places=6)
+        band = highlight_band(pieces["dangle"], radius)
+        self.assertEqual(len(band), 4)
+        self.assertAlmostEqual(max(point.y for point in band) - min(point.y for point in band), radius * 2, places=6)
 
     def test_overshoot_highlights_the_tail(self):
         features = [
@@ -180,6 +190,22 @@ class ReviewKeyTests(unittest.TestCase):
         self.assertTrue(decision_for_key("KP_Enter"))
         self.assertFalse(decision_for_key("space"))
         self.assertIsNone(decision_for_key("Escape"))
+
+    def test_a_second_answer_for_the_same_end_is_ignored(self):
+        state = {"i": 0}
+        self.assertTrue(claim_choice(state))
+        self.assertFalse(claim_choice(state))
+        release_choice(state)
+        self.assertTrue(claim_choice(state))
+
+    def test_the_same_end_is_kept_once(self):
+        features = [
+            feature((0, 5), (4.6, 5)),
+            feature((5, 0), (5, 10)),
+        ]
+        found = collect_corrections(features, 1.0, fix_overshoots=False)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(len(dedupe_corrections(found + found)), 1)
         self.assertTrue(is_review_mode("Review"))
         self.assertTrue(is_review_mode(" review "))
         self.assertFalse(is_review_mode("Automatic"))

@@ -17,6 +17,8 @@ from network_topology.dangle_resolver import (
 from network_topology.review_ui import (
     apply_decisions,
     collect_corrections,
+    highlight_band,
+    highlight_radius,
     review_corrections,
     review_highlight,
     review_zoom_extent,
@@ -269,11 +271,15 @@ _TRIM_COLOR = (209, 36, 47, 255)
 
 
 def _paint_layer(layer, rgb, width: float) -> None:
+    color = {"RGB": [int(rgb[0]), int(rgb[1]), int(rgb[2]), 255]}
     try:
         symbol = layer.symbology
         symbol.updateRenderer("SimpleRenderer")
         drawn = symbol.renderer.symbol
-        drawn.color = {"RGB": list(rgb)}
+        try:
+            drawn.color = color
+        except Exception:
+            drawn.color = {"RGB": color["RGB"][:3]}
         for name in ("size", "width"):
             if hasattr(drawn, name):
                 try:
@@ -281,6 +287,8 @@ def _paint_layer(layer, rgb, width: float) -> None:
                 except Exception:
                     pass
         layer.symbology = symbol
+        layer.transparency = 0
+        layer.visible = True
     except Exception:
         return
 
@@ -288,13 +296,18 @@ def _paint_layer(layer, rgb, width: float) -> None:
 def _memory_layer(active_map, name: str, shape: str, spatial_ref, rgb, width: float):
     import arcpy
 
-    path = rf"memory\{name}"
+    # in_memory is drawn by an open map while a tool is still running.
+    path = rf"in_memory\{name}"
     if arcpy.Exists(path):
         arcpy.management.Delete(path)
     arcpy.management.CreateFeatureclass(
-        "memory", name, shape, spatial_reference=spatial_ref
+        "in_memory", name, shape, spatial_reference=spatial_ref
     )
     layer = active_map.addDataFromPath(path)
+    try:
+        active_map.moveLayer(active_map.listLayers()[0], layer, "BEFORE")
+    except Exception:
+        pass
     try:
         layer.name = name.replace("nt_review_", "").replace("_", " ").title()
     except Exception:
@@ -357,17 +370,94 @@ def _line_if_separated(points, spatial_ref):
     return points_to_polyline([points], spatial_ref, False, False)
 
 
+def _polygon(points, spatial_ref):
+    import arcpy
+
+    array = arcpy.Array([arcpy.Point(point.x, point.y) for point in points])
+    array.add(arcpy.Point(points[0].x, points[0].y))
+    return arcpy.Polygon(array, spatial_ref)
+
+
+def _select_source(state: dict, feature_index: int) -> None:
+    """Select the feature on the layer already drawn in the map."""
+    import arcpy
+
+    layer = state.get("source")
+    oids = state.get("oids") or []
+    oid_field = state.get("oid_field")
+    if layer is None or oid_field is None or feature_index >= len(oids):
+        return
+    oid = oids[feature_index]
+    if oid is None:
+        return
+    delimited = arcpy.AddFieldDelimiters(layer, oid_field)
+    arcpy.management.SelectLayerByAttribute(
+        layer, "NEW_SELECTION", f"{delimited} = {int(oid)}"
+    )
+
+
+def _find_map_layer(active_map, in_features):
+    """The layer already drawn in the map for this input."""
+    import arcpy
+
+    described = arcpy.Describe(in_features)
+    data_type = str(getattr(described, "dataType", "") or "")
+    catalog = str(getattr(described, "catalogPath", "") or "")
+    name = str(getattr(described, "name", "") or "")
+    matches = []
+    if active_map is not None:
+        for lyr in active_map.listLayers():
+            try:
+                if not lyr.isFeatureLayer:
+                    continue
+                lyr_desc = arcpy.Describe(lyr)
+            except Exception:
+                continue
+            lyr_path = str(getattr(lyr_desc, "catalogPath", "") or "")
+            same_data = bool(catalog) and lyr_path.lower() == catalog.lower()
+            same_name = bool(name) and (lyr.name == name or lyr.longName == name)
+            if same_data or (data_type == "FeatureLayer" and same_name):
+                matches.append(lyr)
+    if name:
+        for lyr in matches:
+            if lyr.name == name or lyr.longName == name:
+                return lyr
+    if matches:
+        return matches[0]
+    if data_type == "FeatureLayer":
+        return in_features
+    return None
+
+
+def _emphasize_selection(layer, state: dict) -> None:
+    """Draw the selected feature with a thick orange stroke."""
+    if state.get("symbol_saved") or layer is None or isinstance(layer, str):
+        return
+    state["symbol_saved"] = True
+    try:
+        saved = layer.getDefinition("V3")
+        cim = layer.getDefinition("V3")
+        stroke = cim.selectionSymbol.symbol.symbolLayers[0]
+        stroke.color.values = [232, 122, 26, 100]
+        if hasattr(stroke, "width"):
+            stroke.width = 12
+        layer.setDefinition(cim)
+        state["saved_definition"] = saved
+    except Exception:
+        state["saved_definition"] = None
+
+
 def _ensure_highlight_layers(state: dict, spatial_ref, active_map) -> None:
     if state.get("ready"):
         return
     dangle_path, dangle_layer = _memory_layer(
-        active_map, "nt_review_dangle", "POLYLINE", spatial_ref, _DANGLE_COLOR, 5
+        active_map, "nt_review_dangle", "POLYGON", spatial_ref, _DANGLE_COLOR, 2
     )
     change_path, change_layer = _memory_layer(
-        active_map, "nt_review_change", "POLYLINE", spatial_ref, _EXTEND_COLOR, 5
+        active_map, "nt_review_change", "POLYGON", spatial_ref, _EXTEND_COLOR, 2
     )
     end_path, end_layer = _memory_layer(
-        active_map, "nt_review_end", "POINT", spatial_ref, _DANGLE_COLOR, 14
+        active_map, "nt_review_end", "POINT", spatial_ref, _DANGLE_COLOR, 18
     )
     state.update(
         {
@@ -398,15 +488,21 @@ def _zoom_to_correction(correction: Correction, spatial_ref, state: dict) -> Non
     except Exception:
         pass
 
-    dangle = _line_if_separated(pieces["dangle"], spatial_ref)
-    change = _line_if_separated(pieces["change"], spatial_ref)
-    _replace_rows(state["dangle_path"], [dangle] if dangle is not None else [])
-    _replace_rows(state["change_path"], [change] if change is not None else [])
+    radius = highlight_radius(correction)
+    dangle_band = highlight_band(pieces["dangle"], radius)
+    change_band = highlight_band(pieces["change"], radius * 0.7)
+    _replace_rows(state["dangle_path"], [_polygon(dangle_band, spatial_ref)])
+    _replace_rows(state["change_path"], [_polygon(change_band, spatial_ref)])
     anchor = pieces["anchor"]
-    point = arcpy.PointGeometry(
-        arcpy.Point(anchor.x, anchor.y), spatial_ref
-    )
+    point = arcpy.PointGeometry(arcpy.Point(anchor.x, anchor.y), spatial_ref)
     _replace_rows(state["end_path"], [point])
+    for layer in state.get("layers") or []:
+        try:
+            layer.visible = True
+        except Exception:
+            pass
+    _select_source(state, correction.feature_index)
+    _emphasize_selection(state.get("source"), state)
 
     end = "start" if correction.at_start else "end"
     arcpy.AddMessage(
@@ -422,12 +518,38 @@ def _zoom_to_correction(correction: Correction, spatial_ref, state: dict) -> Non
 def _clear_review_overlay(state: dict) -> None:
     import arcpy
 
+    source = state.get("source")
+    saved = state.get("saved_definition")
+    if saved is not None and source is not None and not isinstance(source, str):
+        try:
+            source.setDefinition(saved)
+        except Exception:
+            pass
+    if source is not None:
+        previous = state.get("previous_selection")
+        try:
+            if previous:
+                arcpy.management.SelectLayerByAttribute(
+                    source,
+                    "NEW_SELECTION",
+                    f"{arcpy.AddFieldDelimiters(source, state.get('oid_field'))} IN ({','.join(str(int(oid)) for oid in previous)})",
+                )
+            else:
+                arcpy.management.SelectLayerByAttribute(source, "CLEAR_SELECTION")
+        except Exception:
+            pass
     active_map = state.get("map")
     for layer in state.get("layers") or []:
         if active_map is None:
             break
         try:
             active_map.removeLayer(layer)
+        except Exception:
+            pass
+    created = state.get("created_source")
+    if created is not None and active_map is not None:
+        try:
+            active_map.removeLayer(created)
         except Exception:
             pass
     for path in state.get("paths") or []:
@@ -458,12 +580,15 @@ def execute_review_dangles(
     geographic = is_geographic(spatial_ref)
 
     fields_probe = _copyable_fields(in_features, in_features)
+    oid_field = arcpy.Describe(in_features).OIDFieldName
     rows = []
     features = []
-    with arcpy.da.SearchCursor(in_features, ["SHAPE@", *fields_probe]) as cursor:
+    oids = []
+    with arcpy.da.SearchCursor(in_features, [oid_field, "SHAPE@", *fields_probe]) as cursor:
         for row in cursor:
-            rows.append(row)
-            features.append({"attrs": None, "parts": geometry_to_parts(row[0], has_z, has_m)})
+            oids.append(row[0])
+            rows.append(row[2:])
+            features.append({"attrs": None, "parts": geometry_to_parts(row[1], has_z, has_m)})
 
     if geographic:
         latitude = mean_latitude(features)
@@ -492,7 +617,31 @@ def execute_review_dangles(
 
     accepted_flags: list[bool]
     if corrections:
-        overlay: dict = {}
+        _view, active_map = _open_map_view()
+        source_layer = _find_map_layer(active_map, in_features)
+        created_source = None
+        previous_selection = None
+        try:
+            if source_layer is None:
+                made = arcpy.management.MakeFeatureLayer(in_features, "nt_review_source")
+                created_source = arcpy.mp.Layer(made.getOutput(0))
+                active_map.addLayer(created_source, "TOP")
+                source_layer = created_source
+            else:
+                previous_selection = arcpy.Describe(source_layer).FIDSet
+        except Exception:
+            source_layer = in_features
+        overlay: dict = {
+            "source": source_layer,
+            "oid_field": oid_field,
+            "oids": oids,
+            "previous_selection": [
+                int(piece)
+                for piece in str(previous_selection or "").replace(";", " ").split()
+                if piece.lstrip("-").isdigit()
+            ],
+            "created_source": created_source,
+        }
 
         def on_show(correction: Correction):
             return _zoom_to_correction(correction, spatial_ref, overlay)
@@ -529,7 +678,7 @@ def execute_review_dangles(
             if len(parts) < 1:
                 continue
             geometry = points_to_polyline(parts, spatial_ref, has_z, has_m)
-            cursor.insertRow([geometry, *row[1:]])
+            cursor.insertRow([geometry, *row])
             written += 1
 
     arcpy.AddMessage(
