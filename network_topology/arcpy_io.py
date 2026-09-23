@@ -294,26 +294,48 @@ def _paint_layer(layer, rgb, width: float) -> None:
 
 
 def _memory_layer(active_map, name: str, shape: str, spatial_ref, rgb, width: float):
+    """Put a scratch feature class on the open map as a layer file.
+
+    An in-memory dataset path is rejected as a web service. The scratch
+    geodatabase is a dataset Pro can add.
+    """
+    import os
+
     import arcpy
 
-    # in_memory is drawn by an open map while a tool is still running.
-    path = rf"in_memory\{name}"
-    if arcpy.Exists(path):
-        arcpy.management.Delete(path)
-    arcpy.management.CreateFeatureclass(
-        "in_memory", name, shape, spatial_reference=spatial_ref
-    )
-    layer = active_map.addDataFromPath(path)
+    gdb = arcpy.env.scratchGDB
+    if not gdb:
+        raise RuntimeError("No scratch geodatabase is available for the highlight.")
+    catalog = os.path.join(gdb, name)
+    if arcpy.Exists(catalog):
+        arcpy.management.Delete(catalog)
+    if arcpy.Exists(name):
+        arcpy.management.Delete(name)
+    show_outputs = arcpy.env.addOutputsToMap
+    arcpy.env.addOutputsToMap = False
     try:
-        active_map.moveLayer(active_map.listLayers()[0], layer, "BEFORE")
-    except Exception:
-        pass
-    try:
-        layer.name = name.replace("nt_review_", "").replace("_", " ").title()
-    except Exception:
-        pass
+        arcpy.management.CreateFeatureclass(
+            gdb, name, shape, spatial_reference=spatial_ref
+        )
+        catalog = arcpy.Describe(os.path.join(gdb, name)).catalogPath
+        arcpy.management.MakeFeatureLayer(catalog, name)
+        folder = arcpy.env.scratchFolder or os.path.dirname(catalog)
+        lyrx = os.path.join(folder, f"{name}.lyrx")
+        if os.path.exists(lyrx):
+            os.remove(lyrx)
+        arcpy.management.SaveToLayerFile(name, lyrx, "ABSOLUTE")
+        active_map.addLayer(arcpy.mp.LayerFile(lyrx), "TOP")
+    finally:
+        arcpy.env.addOutputsToMap = show_outputs
+    layer = None
+    for candidate in active_map.listLayers():
+        if candidate.name == name:
+            layer = candidate
+            break
+    if layer is None:
+        raise RuntimeError(f"Highlight layer {name} was not added to the map.")
     _paint_layer(layer, rgb, width)
-    return path, layer
+    return catalog, layer
 
 
 def _replace_rows(path: str, rows: list) -> None:
@@ -448,29 +470,31 @@ def _emphasize_selection(layer, state: dict) -> None:
 
 
 def _ensure_highlight_layers(state: dict, spatial_ref, active_map) -> None:
+    """Add the highlight layers. A failure here must not stop the review."""
     if state.get("ready"):
         return
-    dangle_path, dangle_layer = _memory_layer(
-        active_map, "nt_review_dangle", "POLYGON", spatial_ref, _DANGLE_COLOR, 2
+    import arcpy
+
+    state["ready"] = True
+    state["map"] = active_map
+    state.setdefault("layers", [])
+    state.setdefault("paths", [])
+    specs = (
+        ("nt_review_dangle", "POLYGON", _DANGLE_COLOR, 2, "dangle_path", None),
+        ("nt_review_change", "POLYGON", _EXTEND_COLOR, 2, "change_path", "change_layer"),
+        ("nt_review_end", "POINT", _DANGLE_COLOR, 18, "end_path", None),
     )
-    change_path, change_layer = _memory_layer(
-        active_map, "nt_review_change", "POLYGON", spatial_ref, _EXTEND_COLOR, 2
-    )
-    end_path, end_layer = _memory_layer(
-        active_map, "nt_review_end", "POINT", spatial_ref, _DANGLE_COLOR, 18
-    )
-    state.update(
-        {
-            "ready": True,
-            "map": active_map,
-            "layers": [dangle_layer, change_layer, end_layer],
-            "paths": [dangle_path, change_path, end_path],
-            "dangle_path": dangle_path,
-            "change_path": change_path,
-            "change_layer": change_layer,
-            "end_path": end_path,
-        }
-    )
+    for name, shape, color, width, path_key, layer_key in specs:
+        try:
+            path, layer = _memory_layer(active_map, name, shape, spatial_ref, color, width)
+        except Exception as exc:
+            arcpy.AddWarning(f"Could not draw {name} ({exc}). The feature is still selected.")
+            continue
+        state["layers"].append(layer)
+        state["paths"].append(path)
+        state[path_key] = path
+        if layer_key:
+            state[layer_key] = layer
 
 
 def _zoom_to_correction(correction: Correction, spatial_ref, state: dict) -> None:
@@ -482,20 +506,25 @@ def _zoom_to_correction(correction: Correction, spatial_ref, state: dict) -> Non
     pieces = review_highlight(correction)
     kind = "Undershoot" if correction.kind == "undershoot" else "Overshoot"
     change_color = _EXTEND_COLOR if correction.kind == "undershoot" else _TRIM_COLOR
-    _paint_layer(state["change_layer"], change_color, 5)
-    try:
-        state["change_layer"].name = "Extension" if correction.kind == "undershoot" else "Tail"
-    except Exception:
-        pass
+    change_layer = state.get("change_layer")
+    if change_layer is not None:
+        _paint_layer(change_layer, change_color, 5)
+        try:
+            change_layer.name = "Extension" if correction.kind == "undershoot" else "Tail"
+        except Exception:
+            pass
 
     radius = highlight_radius(correction)
     dangle_band = highlight_band(pieces["dangle"], radius)
     change_band = highlight_band(pieces["change"], radius * 0.7)
-    _replace_rows(state["dangle_path"], [_polygon(dangle_band, spatial_ref)])
-    _replace_rows(state["change_path"], [_polygon(change_band, spatial_ref)])
     anchor = pieces["anchor"]
     point = arcpy.PointGeometry(arcpy.Point(anchor.x, anchor.y), spatial_ref)
-    _replace_rows(state["end_path"], [point])
+    if state.get("dangle_path"):
+        _replace_rows(state["dangle_path"], [_polygon(dangle_band, spatial_ref)])
+    if state.get("change_path"):
+        _replace_rows(state["change_path"], [_polygon(change_band, spatial_ref)])
+    if state.get("end_path"):
+        _replace_rows(state["end_path"], [point])
     for layer in state.get("layers") or []:
         try:
             layer.visible = True
