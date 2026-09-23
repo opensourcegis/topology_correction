@@ -15,6 +15,7 @@ from network_topology.review_ui import (
     decision_for_key,
     is_review_mode,
     render_review_png,
+    review_highlight,
     review_zoom_extent,
 )
 
@@ -126,6 +127,35 @@ class ReviewDecisionTests(unittest.TestCase):
         part = result.features[0]["parts"][0]
         self.assertAlmostEqual(part[0].x, 5.0, places=6)
         self.assertAlmostEqual(part[-1].x, 4.7, places=6)
+
+
+class ReviewHighlightTests(unittest.TestCase):
+    def test_undershoot_highlights_the_end_segment_and_the_extension(self):
+        features = [
+            feature((0, 5), (2, 5), (4.6, 5)),
+            feature((5, 0), (5, 10)),
+        ]
+        correction = collect_corrections(features, 1.0, fix_overshoots=False)[0]
+        pieces = review_highlight(correction)
+        self.assertEqual(pieces["kind"], "undershoot")
+        self.assertAlmostEqual(pieces["dangle"][0].x, 2.0, places=6)
+        self.assertAlmostEqual(pieces["dangle"][1].x, 4.6, places=6)
+        self.assertAlmostEqual(pieces["change"][0].x, 4.6, places=6)
+        self.assertAlmostEqual(pieces["change"][1].x, 5.0, places=6)
+        self.assertAlmostEqual(pieces["anchor"].x, 4.6, places=6)
+        self.assertNotAlmostEqual(pieces["dangle"][0].x, 0.0, places=6)
+
+    def test_overshoot_highlights_the_tail(self):
+        features = [
+            feature((0, 5), (3, 5), (6, 5)),
+            feature((5, 0), (5, 10)),
+        ]
+        correction = collect_corrections(features, 1.5, fix_undershoots=False)[0]
+        pieces = review_highlight(correction)
+        self.assertEqual(pieces["kind"], "overshoot")
+        self.assertAlmostEqual(pieces["anchor"].x, 6.0, places=6)
+        self.assertAlmostEqual(pieces["change"][0].x, 6.0, places=6)
+        self.assertAlmostEqual(pieces["change"][1].x, 5.0, places=6)
 
 
 class ReviewZoomTests(unittest.TestCase):

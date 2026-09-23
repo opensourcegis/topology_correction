@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import struct
 import zlib
-from typing import Callable, Sequence
+from typing import Any, Callable, Sequence
 
 from network_topology.dangle_resolver import Correction, resolve_dangles
 from network_topology.geometry import Point
@@ -94,6 +94,31 @@ _PAPER = (244, 246, 245)
 _LINE = (55, 68, 80)
 _CONTEXT = (176, 184, 190)
 _TAIL = (214, 96, 96)
+
+
+def review_highlight(correction: Correction) -> dict[str, Any]:
+    """Pieces of one dangling end to draw on the map.
+
+    ``dangle`` is the end segment under review. ``change`` is the extension
+    that would be added, or the tail that would be cut. ``anchor`` is the
+    free vertex.
+    """
+    before = correction.before
+    after = correction.after
+    if correction.at_start:
+        anchor = before[0]
+        neighbor = before[1] if len(before) > 1 else before[0]
+        proposed = after[0]
+    else:
+        anchor = before[-1]
+        neighbor = before[-2] if len(before) > 1 else before[-1]
+        proposed = after[-1]
+    return {
+        "dangle": [neighbor, anchor],
+        "change": [anchor, proposed],
+        "anchor": anchor,
+        "kind": correction.kind,
+    }
 
 
 def review_zoom_extent(correction: Correction) -> tuple[float, float, float, float]:

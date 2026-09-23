@@ -18,6 +18,7 @@ from network_topology.review_ui import (
     apply_decisions,
     collect_corrections,
     review_corrections,
+    review_highlight,
     review_zoom_extent,
 )
 from network_topology.geographic import ellipsoid_axes, mean_latitude
@@ -261,15 +262,58 @@ def _resolve_loaded(
     )
 
 
-def _paint_proposed(layer) -> None:
+# Orange marks the end being reviewed. Green is an extension, red is a tail.
+_DANGLE_COLOR = (232, 122, 26, 255)
+_EXTEND_COLOR = (27, 138, 62, 255)
+_TRIM_COLOR = (209, 36, 47, 255)
+
+
+def _paint_layer(layer, rgb, width: float) -> None:
     try:
         symbol = layer.symbology
         symbol.updateRenderer("SimpleRenderer")
-        symbol.renderer.symbol.color = {"RGB": [27, 138, 62, 100]}
-        symbol.renderer.symbol.size = 2.5
+        drawn = symbol.renderer.symbol
+        drawn.color = {"RGB": list(rgb)}
+        for name in ("size", "width"):
+            if hasattr(drawn, name):
+                try:
+                    setattr(drawn, name, width)
+                except Exception:
+                    pass
         layer.symbology = symbol
     except Exception:
         return
+
+
+def _memory_layer(active_map, name: str, shape: str, spatial_ref, rgb, width: float):
+    import arcpy
+
+    path = rf"memory\{name}"
+    if arcpy.Exists(path):
+        arcpy.management.Delete(path)
+    arcpy.management.CreateFeatureclass(
+        "memory", name, shape, spatial_reference=spatial_ref
+    )
+    layer = active_map.addDataFromPath(path)
+    try:
+        layer.name = name.replace("nt_review_", "").replace("_", " ").title()
+    except Exception:
+        pass
+    _paint_layer(layer, rgb, width)
+    return path, layer
+
+
+def _replace_rows(path: str, rows: list) -> None:
+    import arcpy
+
+    with arcpy.da.UpdateCursor(path, "OID@") as cursor:
+        for row in cursor:
+            cursor.deleteRow()
+    if not rows:
+        return
+    with arcpy.da.InsertCursor(path, ["SHAPE@"]) as cursor:
+        for geometry in rows:
+            cursor.insertRow([geometry])
 
 
 def _open_map_view():
@@ -305,37 +349,65 @@ def _move_map_to_extent(view, extent) -> None:
         ) from exc
 
 
+def _line_if_separated(points, spatial_ref):
+    if len(points) < 2:
+        return None
+    if points[0].x == points[1].x and points[0].y == points[1].y:
+        return None
+    return points_to_polyline([points], spatial_ref, False, False)
+
+
+def _ensure_highlight_layers(state: dict, spatial_ref, active_map) -> None:
+    if state.get("ready"):
+        return
+    dangle_path, dangle_layer = _memory_layer(
+        active_map, "nt_review_dangle", "POLYLINE", spatial_ref, _DANGLE_COLOR, 5
+    )
+    change_path, change_layer = _memory_layer(
+        active_map, "nt_review_change", "POLYLINE", spatial_ref, _EXTEND_COLOR, 5
+    )
+    end_path, end_layer = _memory_layer(
+        active_map, "nt_review_end", "POINT", spatial_ref, _DANGLE_COLOR, 14
+    )
+    state.update(
+        {
+            "ready": True,
+            "map": active_map,
+            "layers": [dangle_layer, change_layer, end_layer],
+            "paths": [dangle_path, change_path, end_path],
+            "dangle_path": dangle_path,
+            "change_path": change_path,
+            "change_layer": change_layer,
+            "end_path": end_path,
+        }
+    )
+
+
 def _zoom_to_correction(correction: Correction, spatial_ref, state: dict) -> None:
-    """Move the open map onto this dangling end."""
+    """Move the open map onto this dangling end and color that end."""
     import arcpy
 
     view, active_map = _open_map_view()
-
-    fc = state.get("fc")
-    if not fc:
-        fc = r"memory\nt_review_proposal"
-        if arcpy.Exists(fc):
-            arcpy.management.Delete(fc)
-        arcpy.management.CreateFeatureclass(
-            "memory", "nt_review_proposal", "POLYLINE", spatial_reference=spatial_ref
-        )
-        state["fc"] = fc
-        state["map"] = active_map
-        try:
-            layer = active_map.addDataFromPath(fc)
-            state["layer"] = layer
-            _paint_proposed(layer)
-        except Exception:
-            state["layer"] = None
-
-    with arcpy.da.UpdateCursor(fc, "OID@") as cursor:
-        for row in cursor:
-            cursor.deleteRow()
-    geometry = points_to_polyline([correction.after], spatial_ref, False, False)
-    with arcpy.da.InsertCursor(fc, ["SHAPE@"]) as cursor:
-        cursor.insertRow([geometry])
-
+    _ensure_highlight_layers(state, spatial_ref, active_map)
+    pieces = review_highlight(correction)
     kind = "Undershoot" if correction.kind == "undershoot" else "Overshoot"
+    change_color = _EXTEND_COLOR if correction.kind == "undershoot" else _TRIM_COLOR
+    _paint_layer(state["change_layer"], change_color, 5)
+    try:
+        state["change_layer"].name = "Extension" if correction.kind == "undershoot" else "Tail"
+    except Exception:
+        pass
+
+    dangle = _line_if_separated(pieces["dangle"], spatial_ref)
+    change = _line_if_separated(pieces["change"], spatial_ref)
+    _replace_rows(state["dangle_path"], [dangle] if dangle is not None else [])
+    _replace_rows(state["change_path"], [change] if change is not None else [])
+    anchor = pieces["anchor"]
+    point = arcpy.PointGeometry(
+        arcpy.Point(anchor.x, anchor.y), spatial_ref
+    )
+    _replace_rows(state["end_path"], [point])
+
     end = "start" if correction.at_start else "end"
     arcpy.AddMessage(
         f"{kind}, feature {correction.feature_index + 1}, {end}. "
@@ -350,19 +422,20 @@ def _zoom_to_correction(correction: Correction, spatial_ref, state: dict) -> Non
 def _clear_review_overlay(state: dict) -> None:
     import arcpy
 
-    layer = state.get("layer")
     active_map = state.get("map")
-    if layer is not None and active_map is not None:
+    for layer in state.get("layers") or []:
+        if active_map is None:
+            break
         try:
             active_map.removeLayer(layer)
         except Exception:
             pass
-    fc = state.get("fc")
-    if fc and arcpy.Exists(fc):
-        try:
-            arcpy.management.Delete(fc)
-        except Exception:
-            pass
+    for path in state.get("paths") or []:
+        if path and arcpy.Exists(path):
+            try:
+                arcpy.management.Delete(path)
+            except Exception:
+                pass
 
 
 def execute_review_dangles(

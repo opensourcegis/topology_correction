@@ -33,6 +33,8 @@ class ArcToolboxTests(unittest.TestCase):
         self.assertIn("is_review_mode", script)
         self.assertIn("execute_review_dangles", script)
         self.assertIn("review_zoom_extent", script)
+        self.assertIn("review_highlight", script)
+        self.assertIn("_DANGLE_COLOR", script)
         self.assertIn("ThreadPoolExecutor", script)
         self.assertIn("PARALLEL_MIN_PARTS", script)
         self.assertNotIn("panToExtent", script)
