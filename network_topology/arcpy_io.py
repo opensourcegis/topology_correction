@@ -7,7 +7,13 @@ Imported only when the toolbox runs inside ArcGIS Pro.
 
 from __future__ import annotations
 
-from network_topology.dangle_resolver import Correction, ResolveResult, resolve_dangles
+from network_topology.dangle_resolver import (
+    Correction,
+    ResolveResult,
+    parallel_thread_count,
+    resolve_dangles,
+    use_parallel,
+)
 from network_topology.review_ui import (
     apply_decisions,
     collect_corrections,
@@ -176,6 +182,7 @@ def execute_resolve_dangles(
         semi_major = semi_minor = None
         tolerance = tolerance_in_xy_units(tolerance_text, spatial_ref)
 
+    _report_parallel(features)
     arcpy.SetProgressor("default", "Resolving dangles...")
     if geographic:
         result = resolve_dangles(
@@ -211,6 +218,17 @@ def execute_resolve_dangles(
     )
     arcpy.ResetProgressor()
     return result
+
+
+def _report_parallel(features) -> None:
+    import arcpy
+
+    parts = [part for feature in features for part in feature["parts"]]
+    threads = parallel_thread_count()
+    if threads > 1 and use_parallel(parts):
+        arcpy.AddMessage(
+            f"Large input ({len(features)} features). Resolving on {threads} threads."
+        )
 
 
 def _resolve_loaded(
@@ -395,6 +413,7 @@ def execute_review_dangles(
         fix_undershoots=fix_undershoots,
         fix_overshoots=fix_overshoots,
     )
+    _report_parallel(features)
     corrections = collect_corrections(features, tolerance, **kwargs)
     arcpy.AddMessage(f"{len(corrections)} topological error(s) within the tolerance.")
 

@@ -18,8 +18,15 @@ trim interpolates Z/M.
 
 from __future__ import annotations
 
+import os
+import threading
 from dataclasses import dataclass, field
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
+
+# Thread startup costs more than resolving a small network. Switch only after
+# the input is large enough that several cores pay for themselves.
+PARALLEL_MIN_PARTS = 1000
+PARALLEL_MIN_VERTICES = 100_000
 
 from network_topology.geographic import (
     WGS84_A,
@@ -113,6 +120,7 @@ def resolve_dangles(
     semi_major: float = WGS84_A,
     semi_minor: float = WGS84_B,
     decide=None,
+    workers: int | None = None,
 ) -> ResolveResult:
     """Clean dangling ends. ``features`` items are ``{"parts", "attrs"}``.
 
@@ -131,6 +139,9 @@ def resolve_dangles(
     ``decide`` is called with each :class:`Correction` the automatic pass would
     make. Return true to apply it and false to leave that end alone. Omit it
     to apply every correction.
+
+    ``workers`` forces the thread count. ``None`` uses one thread for a small
+    input and several threads for a large one.
     """
     if geographic:
         stored = _normalize_features(features)
@@ -154,6 +165,7 @@ def resolve_dangles(
                 semi_major,
                 semi_minor,
                 decide,
+                workers,
             )
         latitudes = [
             point.y
@@ -174,6 +186,7 @@ def resolve_dangles(
                 semi_major,
                 semi_minor,
                 decide,
+                workers,
             )
         return _resolve_banded(
             stored,
@@ -183,9 +196,10 @@ def resolve_dangles(
             semi_major,
             semi_minor,
             decide,
+            workers,
         )
     return _resolve_planar(
-        features, tolerance, fix_undershoots, fix_overshoots, decide
+        features, tolerance, fix_undershoots, fix_overshoots, decide, workers
     )
 
 
@@ -200,6 +214,7 @@ def _resolve_in_frame(
     semi_major: float,
     semi_minor: float,
     decide=None,
+    workers: int | None = None,
 ) -> ResolveResult:
     """Run the planar resolver in one equirectangular metre frame."""
     frame = LocalMeterFrame(latitude, origin_x, origin_y, semi_major, semi_minor)
@@ -216,6 +231,7 @@ def _resolve_in_frame(
         fix_undershoots,
         fix_overshoots,
         _map_decide(decide, frame),
+        workers,
     )
     for feature in result.features:
         feature["parts"] = [
@@ -409,6 +425,7 @@ def _resolve_banded(
     semi_major: float,
     semi_minor: float,
     decide=None,
+    workers: int | None = None,
 ) -> ResolveResult:
     """Solve each end in a metre frame at that end's latitude.
 
@@ -439,14 +456,23 @@ def _resolve_banded(
         cache[key] = cached
         return cached
 
-    n_ext = 0
-    n_trim = 0
-    for part_index, pts in enumerate(flat_pts):
+    bands = set()
+    for pts in flat_pts:
+        bands.add(latitude_band(pts[0].y))
+        bands.add(latitude_band(pts[-1].y))
+    for band in bands:
+        view(band)
+
+    shared_decide = _guard_decide(decide) if _worker_count(flat_pts, workers) > 1 else decide
+
+    def edit_part(part_index: int):
+        pts = flat_pts[part_index]
+        feature_index, line_index = flat_ref[part_index]
+        tagged = _tag_decide(shared_decide, feature_index, line_index)
         start_band = latitude_band(pts[0].y)
         end_band = latitude_band(pts[-1].y)
         if start_band == end_band:
             frame, lines, index, eps = view(pts[0].y)
-            feature_index, line_index = flat_ref[part_index]
             work, part_ext, part_trim = _resolve_part(
                 part_index,
                 lines[part_index],
@@ -456,25 +482,31 @@ def _resolve_banded(
                 eps,
                 fix_undershoots,
                 fix_overshoots,
-                _map_decide(_tag_decide(decide, feature_index, line_index), frame),
+                _map_decide(tagged, frame),
             )
             if len(work) >= 2 and polyline_length(work) > eps:
                 edited = [frame.inverse(point) for point in work]
             else:
                 edited = []
-        else:
-            feature_index, line_index = flat_ref[part_index]
-            edited, part_ext, part_trim = _resolve_part_across_bands(
-                part_index,
-                pts,
-                view,
-                tolerance,
-                degree_eps,
-                fix_undershoots,
-                fix_overshoots,
-                _tag_decide(decide, feature_index, line_index),
-                flat_pts,
-            )
+            return edited, part_ext, part_trim
+        edited, part_ext, part_trim = _resolve_part_across_bands(
+            part_index,
+            pts,
+            view,
+            tolerance,
+            degree_eps,
+            fix_undershoots,
+            fix_overshoots,
+            tagged,
+            flat_pts,
+        )
+        return edited, part_ext, part_trim
+
+    n_ext = 0
+    n_trim = 0
+    for part_index, (edited, part_ext, part_trim) in enumerate(
+        _map_parts(flat_pts, edit_part, workers)
+    ):
         n_ext += part_ext
         n_trim += part_trim
         feature_index, line_index = flat_ref[part_index]
@@ -640,12 +672,95 @@ def _resolve_part_across_bands(
     return [], 0, 0
 
 
+def use_parallel(parts: Sequence[Sequence[Any]]) -> bool:
+    """True when the network is large enough to resolve on several threads."""
+    count = len(parts)
+    if count >= PARALLEL_MIN_PARTS:
+        return True
+    if count < 2:
+        return False
+    vertices = 0
+    for part in parts:
+        vertices += len(part)
+        if vertices >= PARALLEL_MIN_VERTICES:
+            return True
+    return False
+
+
+def parallel_thread_count() -> int:
+    """Cores to use, honoring ArcGIS parallelProcessingFactor when it is set."""
+    cpus = os.cpu_count() or 1
+    factor = None
+    try:
+        import arcpy
+
+        factor = arcpy.env.parallelProcessingFactor
+    except Exception:
+        factor = None
+    if factor is None or str(factor).strip() in ("", "0", "0%"):
+        count = cpus
+    else:
+        text = str(factor).strip()
+        try:
+            if text.endswith("%"):
+                count = int(cpus * float(text[:-1]) / 100.0)
+            else:
+                count = int(float(text))
+        except ValueError:
+            count = cpus
+    if count < 1:
+        count = cpus
+    return max(1, min(count, cpus))
+
+
+def _worker_count(parts: Sequence[Sequence[Any]], workers: int | None) -> int:
+    jobs = len(parts)
+    if jobs <= 1:
+        return 1
+    if workers is not None:
+        return max(1, min(int(workers), jobs))
+    if not use_parallel(parts):
+        return 1
+    return max(1, min(parallel_thread_count(), jobs))
+
+
+def _guard_decide(decide):
+    """Serialize a callback that records corrections while parts run together."""
+    if decide is None:
+        return None
+    lock = threading.Lock()
+
+    def wrapped(correction: Correction) -> bool:
+        with lock:
+            return bool(decide(correction))
+
+    return wrapped
+
+
+def _map_parts(
+    parts: Sequence[Sequence[Any]],
+    worker: Callable[[int], Any],
+    workers: int | None,
+) -> list[Any]:
+    """Run ``worker(index)`` for every part. Threads start only for a large input."""
+    jobs = len(parts)
+    count = _worker_count(parts, workers)
+    if count <= 1:
+        return [worker(index) for index in range(jobs)]
+    from concurrent.futures import ThreadPoolExecutor
+
+    chunksize = max(1, jobs // (count * 8))
+    with ThreadPoolExecutor(max_workers=count) as pool:
+        return list(pool.map(worker, range(jobs), chunksize=chunksize))
+
+
 def _resolve_planar(
     features: Sequence[dict[str, Any]],
     tolerance: float,
     fix_undershoots: bool = True,
     fix_overshoots: bool = True,
     decide=None,
+    workers: int | None = None,
 ) -> ResolveResult:
     stored = _normalize_features(features)
     flat_pts: list[list[Point]] = []
@@ -660,24 +775,30 @@ def _resolve_planar(
 
     eps = data_eps(p for part in flat_pts for p in part)
     index = LineIndex(flat_pts, cell=max(tolerance, eps * 1e6, 1e-6))
-    n_ext = 0
-    n_trim = 0
+    shared_decide = _guard_decide(decide) if _worker_count(flat_pts, workers) > 1 else decide
 
-    for i, pts in enumerate(flat_pts):
-        feature_index, line_index = flat_ref[i]
-        work, part_ext, part_trim = _resolve_part(
-            i,
-            pts,
+    def edit_part(part_index: int):
+        feature_index, line_index = flat_ref[part_index]
+        return _resolve_part(
+            part_index,
+            flat_pts[part_index],
             flat_pts,
             index,
             tolerance,
             eps,
             fix_undershoots,
             fix_overshoots,
-            _tag_decide(decide, feature_index, line_index),
+            _tag_decide(shared_decide, feature_index, line_index),
         )
+
+    n_ext = 0
+    n_trim = 0
+    for part_index, (work, part_ext, part_trim) in enumerate(
+        _map_parts(flat_pts, edit_part, workers)
+    ):
         n_ext += part_ext
         n_trim += part_trim
+        feature_index, line_index = flat_ref[part_index]
         stored[feature_index]["parts"][line_index] = work
 
     for feat in stored:

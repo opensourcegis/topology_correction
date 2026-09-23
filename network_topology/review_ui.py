@@ -136,6 +136,13 @@ def collect_corrections(features, tolerance: float, **kwargs) -> list[Correction
         return True
 
     resolve_dangles(features, tolerance, decide=decide, **kwargs)
+    found.sort(
+        key=lambda correction: (
+            correction.part_index,
+            correction.kind != "overshoot",
+            not correction.at_start,
+        )
+    )
     return found
 
 

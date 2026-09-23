@@ -12,7 +12,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from network_topology.dangle_resolver import resolve_dangles
+from network_topology.dangle_resolver import (
+    PARALLEL_MIN_PARTS,
+    PARALLEL_MIN_VERTICES,
+    resolve_dangles,
+    use_parallel,
+)
 from network_topology.geometry import (
     Point,
     polyline_length,
@@ -254,6 +259,64 @@ class ResolveDanglesTests(unittest.TestCase):
         # Cut is 5/6 of the way from z=0 to z=60.
         self.assertAlmostEqual(tip.z, 50.0, places=6)
         self.assertAlmostEqual(tip.m, 5.0, places=6)
+
+
+class ParallelResolveTests(unittest.TestCase):
+    def test_small_network_stays_on_one_thread(self):
+        import concurrent.futures as futures
+
+        original = futures.ThreadPoolExecutor
+
+        def fail(*_args, **_kwargs):
+            raise AssertionError("small input started a thread pool")
+
+        futures.ThreadPoolExecutor = fail
+        try:
+            result = resolve_dangles(
+                [feature((0, 5), (4.6, 5)), feature((5, 0), (5, 10))],
+                1.0,
+                fix_overshoots=False,
+            )
+        finally:
+            futures.ThreadPoolExecutor = original
+        self.assertEqual(result.extended, 1)
+
+    def test_threshold_switches_only_for_a_large_input(self):
+        self.assertFalse(use_parallel([[(0, 0), (1, 0)]] * 10))
+        self.assertTrue(use_parallel([[(0, 0), (1, 0)]] * PARALLEL_MIN_PARTS))
+        self.assertTrue(use_parallel([[(0, 0)] * PARALLEL_MIN_VERTICES, [(0, 0), (1, 0)]]))
+
+    def test_threads_match_the_serial_result(self):
+        features = [feature((0, y), (4.6, y)) for y in range(24)]
+        features.append(feature((5, -1), (5, 30)))
+        serial = resolve_dangles(features, 1.0, workers=1, fix_overshoots=False)
+        parallel = resolve_dangles(features, 1.0, workers=4, fix_overshoots=False)
+        self.assertEqual(serial.extended, parallel.extended)
+        self.assertEqual(parallel.extended, 24)
+        for left, right in zip(serial.features, parallel.features):
+            for part_a, part_b in zip(left["parts"], right["parts"]):
+                for point_a, point_b in zip(part_a, part_b):
+                    self.assertAlmostEqual(point_a.x, point_b.x, places=6)
+                    self.assertAlmostEqual(point_a.y, point_b.y, places=6)
+
+    def test_parallel_geographic_matches_serial(self):
+        from network_topology.geographic import meters_per_degree
+
+        lon_scale, _ = meters_per_degree(0.0)
+        features = [
+            feature((0.0, lat), (4.6 / lon_scale, lat)) for lat in (i * 0.15 for i in range(8))
+        ]
+        features.append(feature((5.0 / lon_scale, -0.2), (5.0 / lon_scale, 2.0)))
+        serial = resolve_dangles(features, 1.0, geographic=True, workers=1, fix_overshoots=False)
+        parallel = resolve_dangles(features, 1.0, geographic=True, workers=3, fix_overshoots=False)
+        self.assertEqual(serial.extended, parallel.extended)
+        self.assertGreater(serial.extended, 0)
+        for left, right in zip(serial.features, parallel.features):
+            for part_a, part_b in zip(left["parts"], right["parts"]):
+                self.assertEqual(len(part_a), len(part_b))
+                for point_a, point_b in zip(part_a, part_b):
+                    self.assertAlmostEqual(point_a.x, point_b.x, places=6)
+                    self.assertAlmostEqual(point_a.y, point_b.y, places=6)
 
 
 class SegmentIntersectionTests(unittest.TestCase):
