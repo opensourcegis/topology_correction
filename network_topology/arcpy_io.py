@@ -659,7 +659,7 @@ def execute_review_dangles(
         fix_overshoots=fix_overshoots,
     )
     _report_parallel(features)
-    corrections = collect_corrections(features, tolerance, **kwargs)
+    corrections = collect_corrections(features, tolerance, keep_context=False, **kwargs)
     arcpy.AddMessage(f"{len(corrections)} topological error(s) within the tolerance.")
 
     accepted_flags: list[bool]

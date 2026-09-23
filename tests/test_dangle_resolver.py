@@ -13,8 +13,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from network_topology.dangle_resolver import (
+    PARALLEL_MAX_THREADS,
     PARALLEL_MIN_PARTS,
     PARALLEL_MIN_VERTICES,
+    parallel_thread_count,
     resolve_dangles,
     use_parallel,
 )
@@ -280,6 +282,10 @@ class ParallelResolveTests(unittest.TestCase):
         finally:
             futures.ThreadPoolExecutor = original
         self.assertEqual(result.extended, 1)
+
+    def test_large_input_does_not_start_one_thread_per_core(self):
+        self.assertLessEqual(parallel_thread_count(), PARALLEL_MAX_THREADS)
+        self.assertLessEqual(PARALLEL_MAX_THREADS, 4)
 
     def test_threshold_switches_only_for_a_large_input(self):
         self.assertFalse(use_parallel([[(0, 0), (1, 0)]] * 10))

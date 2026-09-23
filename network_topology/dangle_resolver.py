@@ -25,8 +25,11 @@ from typing import Any, Callable, Sequence
 
 # Thread startup costs more than resolving a small network. Switch only after
 # the input is large enough that several cores pay for themselves.
+# Pure Python holds the GIL, and ArcGIS Pro stalls when this tool starts one
+# thread per core, so a large file uses a few threads rather than every core.
 PARALLEL_MIN_PARTS = 1000
 PARALLEL_MIN_VERTICES = 100_000
+PARALLEL_MAX_THREADS = 4
 
 from network_topology.geographic import (
     WGS84_A,
@@ -121,6 +124,7 @@ def resolve_dangles(
     semi_minor: float = WGS84_B,
     decide=None,
     workers: int | None = None,
+    keep_context: bool = True,
 ) -> ResolveResult:
     """Clean dangling ends. ``features`` items are ``{"parts", "attrs"}``.
 
@@ -166,6 +170,7 @@ def resolve_dangles(
                 semi_minor,
                 decide,
                 workers,
+                keep_context,
             )
         latitudes = [
             point.y
@@ -187,6 +192,7 @@ def resolve_dangles(
                 semi_minor,
                 decide,
                 workers,
+                keep_context,
             )
         return _resolve_banded(
             stored,
@@ -197,9 +203,10 @@ def resolve_dangles(
             semi_minor,
             decide,
             workers,
+            keep_context,
         )
     return _resolve_planar(
-        features, tolerance, fix_undershoots, fix_overshoots, decide, workers
+        features, tolerance, fix_undershoots, fix_overshoots, decide, workers, keep_context
     )
 
 
@@ -215,6 +222,7 @@ def _resolve_in_frame(
     semi_minor: float,
     decide=None,
     workers: int | None = None,
+    keep_context: bool = True,
 ) -> ResolveResult:
     """Run the planar resolver in one equirectangular metre frame."""
     frame = LocalMeterFrame(latitude, origin_x, origin_y, semi_major, semi_minor)
@@ -232,6 +240,7 @@ def _resolve_in_frame(
         fix_overshoots,
         _map_decide(decide, frame),
         workers,
+        keep_context,
     )
     for feature in result.features:
         feature["parts"] = [
@@ -278,6 +287,7 @@ def _confirm(
     after: Sequence[Point],
     flat_pts: Sequence[Sequence[Point]],
     pad: float,
+    keep_context: bool = True,
 ) -> bool:
     if decide is None:
         return True
@@ -289,7 +299,7 @@ def _confirm(
         gap=float(gap),
         before=_copy_pts(before),
         after=_copy_pts(after),
-        context=_context_lines(flat_pts, part_index, focus, pad),
+        context=_context_lines(flat_pts, part_index, focus, pad) if keep_context else [],
     )
     return bool(decide(correction))
 
@@ -340,6 +350,7 @@ def _resolve_part(
     fix_undershoots: bool,
     fix_overshoots: bool,
     decide=None,
+    keep_context: bool = True,
 ) -> tuple[list[Point], int, int]:
     """Extend and trim one part against the original network."""
     length = polyline_length(pts)
@@ -372,7 +383,7 @@ def _resolve_part(
             if trimmed_start:
                 start_only = sub_polyline(pts, d0, length, eps)
                 if not _confirm(
-                    decide, part_index, True, "overshoot", d0, pts, start_only, flat_pts, pad
+                    decide, part_index, True, "overshoot", d0, pts, start_only, flat_pts, pad, keep_context
                 ):
                     trimmed_start = False
                     d0 = 0.0
@@ -380,7 +391,7 @@ def _resolve_part(
                 end_only = sub_polyline(pts, 0.0, d1, eps)
                 tail = length - d1
                 if not _confirm(
-                    decide, part_index, False, "overshoot", tail, pts, end_only, flat_pts, pad
+                    decide, part_index, False, "overshoot", tail, pts, end_only, flat_pts, pad, keep_context
                 ):
                     trimmed_end = False
                     d1 = length
@@ -400,7 +411,7 @@ def _resolve_part(
                 proposed = [hit, *work]
                 gap = dist(work[0], hit)
                 if _confirm(
-                    decide, part_index, True, "undershoot", gap, work, proposed, flat_pts, pad
+                    decide, part_index, True, "undershoot", gap, work, proposed, flat_pts, pad, keep_context
                 ):
                     work = proposed
                     n_ext += 1
@@ -410,7 +421,7 @@ def _resolve_part(
                 proposed = [*work, hit]
                 gap = dist(work[-1], hit)
                 if _confirm(
-                    decide, part_index, False, "undershoot", gap, work, proposed, flat_pts, pad
+                    decide, part_index, False, "undershoot", gap, work, proposed, flat_pts, pad, keep_context
                 ):
                     work = proposed
                     n_ext += 1
@@ -426,6 +437,7 @@ def _resolve_banded(
     semi_minor: float,
     decide=None,
     workers: int | None = None,
+    keep_context: bool = True,
 ) -> ResolveResult:
     """Solve each end in a metre frame at that end's latitude.
 
@@ -441,57 +453,91 @@ def _resolve_banded(
             flat_ref.append((feature_index, part_index))
 
     degree_eps = data_eps(point for part in flat_pts for point in part)
-    cache: dict[float, tuple[LocalMeterFrame, list[list[Point]], LineIndex, float]] = {}
+
+    def metre_view(lat: float):
+        frame = LocalMeterFrame(latitude_band(lat), 0.0, 0.0, semi_major, semi_minor)
+        lines = [[frame.forward(point) for point in part] for part in flat_pts]
+        eps = data_eps(point for part in lines for point in part)
+        index = LineIndex(lines, cell=max(tolerance, eps * 1e6, 1e-6))
+        return frame, lines, index, eps
+
+    grouped: dict[float, list[int]] = {}
+    crossing: list[int] = []
+    for part_index, pts in enumerate(flat_pts):
+        start_band = latitude_band(pts[0].y)
+        end_band = latitude_band(pts[-1].y)
+        if start_band == end_band:
+            grouped.setdefault(start_band, []).append(part_index)
+        else:
+            crossing.append(part_index)
+
+    n_ext = 0
+    n_trim = 0
+
+    def finish(part_index: int, edited: list[Point], part_ext: int, part_trim: int) -> None:
+        nonlocal n_ext, n_trim
+        n_ext += part_ext
+        n_trim += part_trim
+        feature_index, line_index = flat_ref[part_index]
+        stored[feature_index]["parts"][line_index] = edited
+
+    for _band, indices in grouped.items():
+        # One transformed copy of the network. The next band replaces it.
+        frame, lines, index, eps = metre_view(_band)
+        subset = [flat_pts[part_index] for part_index in indices]
+        shared_decide = _guard_decide(decide) if _worker_count(subset, workers) > 1 else decide
+
+        def edit_local(local_index: int, _frame=frame, _lines=lines, _index=index, _eps=eps, _decide=shared_decide):
+            part_index = indices[local_index]
+            feature_index, line_index = flat_ref[part_index]
+            tagged = _tag_decide(_decide, feature_index, line_index)
+            work, part_ext, part_trim = _resolve_part(
+                part_index,
+                _lines[part_index],
+                _lines,
+                _index,
+                tolerance,
+                _eps,
+                fix_undershoots,
+                fix_overshoots,
+                _map_decide(tagged, _frame),
+                keep_context,
+            )
+            if len(work) >= 2 and polyline_length(work) > _eps:
+                edited = [_frame.inverse(point) for point in work]
+            else:
+                edited = []
+            return edited, part_ext, part_trim
+
+        for local_index, (edited, part_ext, part_trim) in enumerate(
+            _map_parts(subset, edit_local, workers)
+        ):
+            finish(indices[local_index], edited, part_ext, part_trim)
+        del lines, index, frame
+
+    # Parts that change latitude need two frames, not a copy for every band.
+    cache: dict[float, tuple] = {}
+    cache_order: list[float] = []
 
     def view(lat: float):
         key = latitude_band(lat)
         cached = cache.get(key)
         if cached is not None:
             return cached
-        frame = LocalMeterFrame(key, 0.0, 0.0, semi_major, semi_minor)
-        lines = [[frame.forward(point) for point in part] for part in flat_pts]
-        eps = data_eps(point for part in lines for point in part)
-        index = LineIndex(lines, cell=max(tolerance, eps * 1e6, 1e-6))
-        cached = (frame, lines, index, eps)
+        while len(cache_order) >= 2:
+            dropped = cache_order.pop(0)
+            cache.pop(dropped, None)
+        cached = metre_view(lat)
         cache[key] = cached
+        cache_order.append(key)
         return cached
 
-    bands = set()
-    for pts in flat_pts:
-        bands.add(latitude_band(pts[0].y))
-        bands.add(latitude_band(pts[-1].y))
-    for band in bands:
-        view(band)
-
-    shared_decide = _guard_decide(decide) if _worker_count(flat_pts, workers) > 1 else decide
-
-    def edit_part(part_index: int):
-        pts = flat_pts[part_index]
+    for part_index in crossing:
         feature_index, line_index = flat_ref[part_index]
-        tagged = _tag_decide(shared_decide, feature_index, line_index)
-        start_band = latitude_band(pts[0].y)
-        end_band = latitude_band(pts[-1].y)
-        if start_band == end_band:
-            frame, lines, index, eps = view(pts[0].y)
-            work, part_ext, part_trim = _resolve_part(
-                part_index,
-                lines[part_index],
-                lines,
-                index,
-                tolerance,
-                eps,
-                fix_undershoots,
-                fix_overshoots,
-                _map_decide(tagged, frame),
-            )
-            if len(work) >= 2 and polyline_length(work) > eps:
-                edited = [frame.inverse(point) for point in work]
-            else:
-                edited = []
-            return edited, part_ext, part_trim
+        tagged = _tag_decide(decide, feature_index, line_index)
         edited, part_ext, part_trim = _resolve_part_across_bands(
             part_index,
-            pts,
+            flat_pts[part_index],
             view,
             tolerance,
             degree_eps,
@@ -499,18 +545,9 @@ def _resolve_banded(
             fix_overshoots,
             tagged,
             flat_pts,
+            keep_context,
         )
-        return edited, part_ext, part_trim
-
-    n_ext = 0
-    n_trim = 0
-    for part_index, (edited, part_ext, part_trim) in enumerate(
-        _map_parts(flat_pts, edit_part, workers)
-    ):
-        n_ext += part_ext
-        n_trim += part_trim
-        feature_index, line_index = flat_ref[part_index]
-        stored[feature_index]["parts"][line_index] = edited
+        finish(part_index, edited, part_ext, part_trim)
 
     for feature in stored:
         feature["parts"] = [
@@ -531,6 +568,7 @@ def _resolve_part_across_bands(
     fix_overshoots: bool,
     decide=None,
     flat_pts: Sequence[Sequence[Point]] | None = None,
+    keep_context: bool = True,
 ) -> tuple[list[Point], int, int]:
     """Trim and extend a part whose ends sit in different latitude bands."""
     trimmed_start = False
@@ -602,6 +640,7 @@ def _resolve_part_across_bands(
                     start_only,
                     neighbors,
                     pad,
+                    keep_context,
                 ):
                     trimmed_start = False
                     d0 = 0.0
@@ -617,6 +656,7 @@ def _resolve_part_across_bands(
                     end_only,
                     neighbors,
                     pad,
+                    keep_context,
                 ):
                     trimmed_end = False
                     d1 = polyline_length(pts)
@@ -644,6 +684,7 @@ def _resolve_part_across_bands(
                     proposed,
                     neighbors,
                     pad,
+                    keep_context,
                 ):
                     work = proposed
                     n_ext += 1
@@ -663,6 +704,7 @@ def _resolve_part_across_bands(
                     proposed,
                     neighbors,
                     pad,
+                    keep_context,
                 ):
                     work = proposed
                     n_ext += 1
@@ -710,7 +752,7 @@ def parallel_thread_count() -> int:
             count = cpus
     if count < 1:
         count = cpus
-    return max(1, min(count, cpus))
+    return max(1, min(count, cpus, PARALLEL_MAX_THREADS))
 
 
 def _worker_count(parts: Sequence[Sequence[Any]], workers: int | None) -> int:
@@ -761,6 +803,7 @@ def _resolve_planar(
     fix_overshoots: bool = True,
     decide=None,
     workers: int | None = None,
+    keep_context: bool = True,
 ) -> ResolveResult:
     stored = _normalize_features(features)
     flat_pts: list[list[Point]] = []
@@ -789,6 +832,7 @@ def _resolve_planar(
             fix_undershoots,
             fix_overshoots,
             _tag_decide(shared_decide, feature_index, line_index),
+            keep_context,
         )
 
     n_ext = 0

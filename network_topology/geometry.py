@@ -312,6 +312,30 @@ def extend_end(
     return Point(hit.x, hit.y, end.z, end.m)
 
 
+def _lines_near_segment(index: LineIndex, a: Point, b: Point, eps: float, part_index: int) -> set[int]:
+    """Line ids whose cells meet this segment.
+
+    A long segment is split so the lookup stays on the cells it crosses.
+    Asking for the whole line at once pulls in every feature and stalls.
+    """
+    found: set[int] = set()
+    span = math.hypot(b.x - a.x, b.y - a.y)
+    cell = index.cell if index.cell > 0 else 1.0
+    pieces = max(1, int(span / (cell * 32.0)) + 1)
+    for step in range(pieces):
+        t0 = step / pieces
+        t1 = (step + 1) / pieces
+        x0 = a.x + (b.x - a.x) * t0
+        y0 = a.y + (b.y - a.y) * t0
+        x1 = a.x + (b.x - a.x) * t1
+        y1 = a.y + (b.y - a.y) * t1
+        box = (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+        for line_index in index.query(box, pad=eps):
+            if line_index != part_index:
+                found.add(line_index)
+    return found
+
+
 def junction_distances(
     part_index: int,
     pts: Sequence[Point],
@@ -321,11 +345,13 @@ def junction_distances(
 ) -> list[float]:
     """Distances along ``pts`` where this part crosses or touches another part."""
     length = polyline_length(pts)
-    box = _bbox(pts)
+    neighbors: set[int] = set()
+    for index_vertex in range(1, len(pts)):
+        neighbors.update(
+            _lines_near_segment(index, pts[index_vertex - 1], pts[index_vertex], eps, part_index)
+        )
     out: list[float] = []
-    for j in index.query(box, pad=eps):
-        if j == part_index:
-            continue
+    for j in neighbors:
         for hit in polyline_intersections(pts, lines[j], eps):
             along, offset = locate_along(pts, hit)
             if offset > eps:

@@ -244,6 +244,8 @@ def apply_decisions(features, tolerance: float, corrections: Sequence[Correction
     def decide(correction: Correction) -> bool:
         return correction.key in chosen
 
+    kwargs = dict(kwargs)
+    kwargs["keep_context"] = False
     return resolve_dangles(features, tolerance, decide=decide, **kwargs)
 
 

@@ -80,6 +80,8 @@ In ArcGIS Pro:
 1. **Automatic** applies every correction inside the tolerance.
 2. **Review** zooms the open map to each dangling end and selects that feature. The end segment is drawn in transparent orange, an extension in transparent green, and a tail in transparent red, at the same line width as the input layer. **Enter** accepts that correction. **Space** leaves the end unchanged. **Escape** cancels and writes nothing. Hold the key until you release it; each end is asked once. A bar at the bottom of the screen shows which error you are on.
 
+A large layer is resolved a few threads at a time, and a geographic layer keeps only one latitude band in memory. In the geoprocessing Environments, set **Parallel Processing Factor** to `1` if Pro is still short of memory.
+
 The input layer is not edited. The tool creates a new polyline feature class.
 A selection or definition query on the input is honored. ModelBuilder can
 read the derived counts **Ends extended** and **Ends trimmed**.

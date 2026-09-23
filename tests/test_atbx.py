@@ -46,6 +46,7 @@ class ArcToolboxTests(unittest.TestCase):
         self.assertIn("_DANGLE_COLOR", script)
         self.assertIn("ThreadPoolExecutor", script)
         self.assertIn("PARALLEL_MIN_PARTS", script)
+        self.assertIn("PARALLEL_MAX_THREADS", script)
         self.assertNotIn("panToExtent", script)
         self.assertNotIn("exportToPNG", script)
         self.assertIn("<root>", toolbox["toolsets"])
