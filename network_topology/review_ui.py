@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
-"""Step through each dangling end while the map stays on that error.
+"""Step through each dangling end. The caller pans the open map to that error.
 
 Enter accepts the correction. Space rejects it and leaves the end unchanged.
 Escape cancels the whole review and writes nothing.

@@ -78,7 +78,7 @@ In ArcGIS Pro:
 **Mode** has two choices:
 
 1. **Automatic** applies every correction inside the tolerance.
-2. **Review** moves the map to each dangling end. **Enter** accepts that correction. **Space** leaves the end unchanged. **Escape** cancels and writes nothing. A bar at the bottom of the screen shows which error you are on. Run Review in the foreground so the map can move.
+2. **Review** pans the open map to each dangling end. The tool moves the map itself. **Enter** accepts that correction. **Space** leaves the end unchanged. **Escape** cancels and writes nothing. A bar at the bottom of the screen shows which error you are on.
 
 The input layer is not edited. The tool creates a new polyline feature class.
 A selection or definition query on the input is honored. ModelBuilder can

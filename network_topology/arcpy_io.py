@@ -260,21 +260,54 @@ def _paint_proposed(layer) -> None:
         return
 
 
-def _zoom_to_correction(correction: Correction, spatial_ref, state: dict) -> str | None:
-    """Move the active map to this error and return a screenshot path."""
-    import os
-    import tempfile
-
+def _open_map_view():
+    """The map the tool is running in. Review pans this view itself."""
     import arcpy
 
     try:
         project = arcpy.mp.ArcGISProject("CURRENT")
-        view = project.activeView
-        active_map = project.activeMap
-    except Exception:
-        return None
-    if view is None or active_map is None:
-        return None
+    except Exception as exc:
+        raise arcpy.ExecuteError(
+            "Review moves the open map. Run the tool inside ArcGIS Pro with a map active."
+        ) from exc
+    view = project.activeView
+    active_map = project.activeMap
+    if view is None or active_map is None or not hasattr(view, "camera"):
+        raise arcpy.ExecuteError(
+            "Review moves the open map. Activate a map view, then run the tool."
+        )
+    return view, active_map
+
+
+def _move_map_to_extent(view, extent) -> None:
+    """Pan and zoom the open map to this extent."""
+    import arcpy
+
+    moved = False
+    errors = []
+    if hasattr(view, "panToExtent"):
+        try:
+            view.panToExtent(extent)
+            moved = True
+        except Exception as exc:
+            errors.append(exc)
+    try:
+        camera = view.camera
+        camera.setExtent(extent)
+        view.camera = camera
+        moved = True
+    except Exception as exc:
+        errors.append(exc)
+    if not moved:
+        detail = "; ".join(str(item) for item in errors) or "the map view did not accept the extent"
+        raise arcpy.ExecuteError(f"Could not move the map to this dangling end ({detail}).")
+
+
+def _zoom_to_correction(correction: Correction, spatial_ref, state: dict) -> None:
+    """Move the open map onto this dangling end."""
+    import arcpy
+
+    view, active_map = _open_map_view()
 
     fc = state.get("fc")
     if not fc:
@@ -308,22 +341,8 @@ def _zoom_to_correction(correction: Correction, spatial_ref, state: dict) -> str
     )
 
     minx, miny, maxx, maxy = _correction_extent(correction)
-    try:
-        extent = arcpy.Extent(minx, miny, maxx, maxy, spatial_reference=spatial_ref)
-        camera = view.camera
-        camera.setExtent(extent)
-        view.camera = camera
-    except Exception:
-        arcpy.AddWarning("Could not move the map to this error.")
-        return None
-
-    folder = arcpy.env.scratchFolder or tempfile.gettempdir()
-    png = os.path.join(folder, "nt_review_error.png")
-    try:
-        view.exportToPNG(png, 960, 540)
-    except Exception:
-        return None
-    return png
+    extent = arcpy.Extent(minx, miny, maxx, maxy, spatial_reference=spatial_ref)
+    _move_map_to_extent(view, extent)
 
 
 def _clear_review_overlay(state: dict) -> None:

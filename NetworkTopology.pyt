@@ -53,7 +53,7 @@ class ResolveDangles(object):
             "Ends are matched against the input geometry in a single pass. This tool "
             "does not node crossings. Run a planarize or topology-split step afterwards "
             "when the network must be split at every intersection. "
-            "Run Review in the foreground so the map can move."
+            "Review pans the open map to each dangling end."
         )
         self.category = "Topology"
         self.canRunInBackground = False

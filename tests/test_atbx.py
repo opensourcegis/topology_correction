@@ -32,6 +32,8 @@ class ArcToolboxTests(unittest.TestCase):
         )
         self.assertIn("is_review_mode", script)
         self.assertIn("execute_review_dangles", script)
+        self.assertIn("panToExtent", script)
+        self.assertNotIn("exportToPNG", script)
         self.assertIn("<root>", toolbox["toolsets"])
 
         self.assertEqual(tool["type"], "ScriptTool")
