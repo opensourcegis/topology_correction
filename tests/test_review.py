@@ -11,14 +11,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from network_topology.dangle_resolver import resolve_dangles
 from network_topology.review_ui import (
     apply_decisions,
-    claim_choice,
+    accept_prompt_key,
     collect_corrections,
     decision_for_key,
     dedupe_corrections,
     highlight_band,
     highlight_radius,
     is_review_mode,
-    release_choice,
+    release_prompt_key,
     render_review_png,
     review_highlight,
     review_zoom_extent,
@@ -192,11 +192,20 @@ class ReviewKeyTests(unittest.TestCase):
         self.assertIsNone(decision_for_key("Escape"))
 
     def test_a_second_answer_for_the_same_end_is_ignored(self):
-        state = {"i": 0}
-        self.assertTrue(claim_choice(state))
-        self.assertFalse(claim_choice(state))
-        release_choice(state)
-        self.assertTrue(claim_choice(state))
+        state = {"armed": True, "held": set()}
+        self.assertTrue(accept_prompt_key(state, "Return"))
+        self.assertFalse(accept_prompt_key(state, "Return"))
+        self.assertFalse(state["armed"])
+        release_prompt_key(state, "Return")
+        self.assertTrue(state["armed"])
+        self.assertTrue(accept_prompt_key(state, "space"))
+
+    def test_a_key_during_the_map_move_does_not_advance(self):
+        state = {"armed": False, "held": set()}
+        self.assertFalse(accept_prompt_key(state, "Return"))
+        release_prompt_key(state, "Return")
+        self.assertTrue(state["armed"])
+        self.assertTrue(accept_prompt_key(state, "Return"))
 
     def test_the_same_end_is_kept_once(self):
         features = [

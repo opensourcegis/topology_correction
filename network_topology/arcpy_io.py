@@ -17,8 +17,6 @@ from network_topology.dangle_resolver import (
 from network_topology.review_ui import (
     apply_decisions,
     collect_corrections,
-    highlight_band,
-    highlight_radius,
     review_corrections,
     review_highlight,
     review_zoom_extent,
@@ -268,9 +266,11 @@ def _resolve_loaded(
 _DANGLE_COLOR = (232, 122, 26, 255)
 _EXTEND_COLOR = (27, 138, 62, 255)
 _TRIM_COLOR = (209, 36, 47, 255)
+# Percent. The line underneath stays visible.
+_HIGHLIGHT_TRANSPARENCY = 55
 
 
-def _paint_layer(layer, rgb, width: float) -> None:
+def _paint_layer(layer, rgb, width: float, transparency: float = _HIGHLIGHT_TRANSPARENCY) -> None:
     color = {"RGB": [int(rgb[0]), int(rgb[1]), int(rgb[2]), 255]}
     try:
         symbol = layer.symbology
@@ -280,17 +280,37 @@ def _paint_layer(layer, rgb, width: float) -> None:
             drawn.color = color
         except Exception:
             drawn.color = {"RGB": color["RGB"][:3]}
-        for name in ("size", "width"):
-            if hasattr(drawn, name):
-                try:
-                    setattr(drawn, name, width)
-                except Exception:
-                    pass
+        if hasattr(drawn, "width"):
+            try:
+                drawn.width = width
+            except Exception:
+                pass
         layer.symbology = symbol
-        layer.transparency = 0
+        layer.transparency = transparency
         layer.visible = True
     except Exception:
         return
+
+
+def _layer_line_width(layer) -> float:
+    """Symbol width of the line layer being reviewed, in points."""
+    if layer is None or isinstance(layer, str):
+        return 1.0
+    try:
+        width = float(layer.symbology.renderer.symbol.width)
+        if width > 0:
+            return width
+    except Exception:
+        pass
+    try:
+        cim = layer.getDefinition("V3")
+        for stroke in cim.renderer.symbol.symbol.symbolLayers:
+            width = getattr(stroke, "width", None)
+            if width and float(width) > 0:
+                return float(width)
+    except Exception:
+        pass
+    return 1.0
 
 
 def _memory_layer(active_map, name: str, shape: str, spatial_ref, rgb, width: float):
@@ -479,12 +499,12 @@ def _ensure_highlight_layers(state: dict, spatial_ref, active_map) -> None:
     state["map"] = active_map
     state.setdefault("layers", [])
     state.setdefault("paths", [])
+    width = float(state.get("line_width") or 1.0)
     specs = (
-        ("nt_review_dangle", "POLYGON", _DANGLE_COLOR, 2, "dangle_path", None),
-        ("nt_review_change", "POLYGON", _EXTEND_COLOR, 2, "change_path", "change_layer"),
-        ("nt_review_end", "POINT", _DANGLE_COLOR, 18, "end_path", None),
+        ("nt_review_dangle", "POLYLINE", _DANGLE_COLOR, "dangle_path", "dangle_layer"),
+        ("nt_review_change", "POLYLINE", _EXTEND_COLOR, "change_path", "change_layer"),
     )
-    for name, shape, color, width, path_key, layer_key in specs:
+    for name, shape, color, path_key, layer_key in specs:
         try:
             path, layer = _memory_layer(active_map, name, shape, spatial_ref, color, width)
         except Exception as exc:
@@ -506,32 +526,30 @@ def _zoom_to_correction(correction: Correction, spatial_ref, state: dict) -> Non
     pieces = review_highlight(correction)
     kind = "Undershoot" if correction.kind == "undershoot" else "Overshoot"
     change_color = _EXTEND_COLOR if correction.kind == "undershoot" else _TRIM_COLOR
+    width = float(state.get("line_width") or 1.0)
+    dangle_layer = state.get("dangle_layer")
+    if dangle_layer is not None:
+        _paint_layer(dangle_layer, _DANGLE_COLOR, width)
     change_layer = state.get("change_layer")
     if change_layer is not None:
-        _paint_layer(change_layer, change_color, 5)
+        _paint_layer(change_layer, change_color, width)
         try:
             change_layer.name = "Extension" if correction.kind == "undershoot" else "Tail"
         except Exception:
             pass
 
-    radius = highlight_radius(correction)
-    dangle_band = highlight_band(pieces["dangle"], radius)
-    change_band = highlight_band(pieces["change"], radius * 0.7)
-    anchor = pieces["anchor"]
-    point = arcpy.PointGeometry(arcpy.Point(anchor.x, anchor.y), spatial_ref)
+    dangle_line = _line_if_separated(pieces["dangle"], spatial_ref)
+    change_line = _line_if_separated(pieces["change"], spatial_ref)
     if state.get("dangle_path"):
-        _replace_rows(state["dangle_path"], [_polygon(dangle_band, spatial_ref)])
+        _replace_rows(state["dangle_path"], [dangle_line] if dangle_line is not None else [])
     if state.get("change_path"):
-        _replace_rows(state["change_path"], [_polygon(change_band, spatial_ref)])
-    if state.get("end_path"):
-        _replace_rows(state["end_path"], [point])
+        _replace_rows(state["change_path"], [change_line] if change_line is not None else [])
     for layer in state.get("layers") or []:
         try:
             layer.visible = True
         except Exception:
             pass
     _select_source(state, correction.feature_index)
-    _emphasize_selection(state.get("source"), state)
 
     end = "start" if correction.at_start else "end"
     arcpy.AddMessage(
@@ -670,6 +688,7 @@ def execute_review_dangles(
                 if piece.lstrip("-").isdigit()
             ],
             "created_source": created_source,
+            "line_width": _layer_line_width(source_layer),
         }
 
         def on_show(correction: Correction):

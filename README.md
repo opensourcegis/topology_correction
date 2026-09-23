@@ -78,7 +78,7 @@ In ArcGIS Pro:
 **Mode** has two choices:
 
 1. **Automatic** applies every correction inside the tolerance.
-2. **Review** zooms the open map to each dangling end and selects that feature, drawn with a thick orange selection. A wide orange band covers the end segment, a green band is the extension, and a red band is a tail that would be trimmed. **Enter** accepts that correction. **Space** leaves the end unchanged. **Escape** cancels and writes nothing. Each end is asked once. A bar at the bottom of the screen shows which error you are on.
+2. **Review** zooms the open map to each dangling end and selects that feature. The end segment is drawn in transparent orange, an extension in transparent green, and a tail in transparent red, at the same line width as the input layer. **Enter** accepts that correction. **Space** leaves the end unchanged. **Escape** cancels and writes nothing. Hold the key until you release it; each end is asked once. A bar at the bottom of the screen shows which error you are on.
 
 The input layer is not edited. The tool creates a new polyline feature class.
 A selection or definition query on the input is honored. ModelBuilder can

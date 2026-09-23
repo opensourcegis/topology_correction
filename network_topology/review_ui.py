@@ -105,7 +105,6 @@ def dedupe_corrections(corrections: Sequence[Correction]) -> list[Correction]:
             correction.feature_index,
             correction.part_in_feature,
             correction.at_start,
-            correction.kind,
         )
         if key in seen:
             continue
@@ -192,20 +191,27 @@ def decision_for_key(keysym: str) -> bool | None:
     return None
 
 
-def claim_choice(state: dict) -> bool:
-    """Accept one answer for the end currently on screen.
+def accept_prompt_key(state: dict, key: str) -> bool:
+    """True for one new keypress while that prompt is on screen.
 
-    A second key or click for that same end returns False and must not advance.
+    Repeats while the key is held, and keys that arrive before the prompt is
+    ready, return False. The next end is not shown until the key comes up.
     """
-    if state.get("busy"):
+    held = state.setdefault("held", set())
+    if key in held or not state.get("armed"):
+        held.add(key)
         return False
-    state["busy"] = True
+    held.add(key)
+    state["armed"] = False
     return True
 
 
-def release_choice(state: dict) -> None:
-    """Allow the next dangling end to be answered."""
-    state["busy"] = False
+def release_prompt_key(state: dict, key: str) -> None:
+    """The decision key came up, so the next prompt may take a new press."""
+    held = state.setdefault("held", set())
+    held.discard(key)
+    if not held.intersection(("Return", "KP_Enter", "space")):
+        state["armed"] = True
 
 
 def is_review_mode(mode: str | None) -> bool:
@@ -447,7 +453,7 @@ def review_corrections(
 
     answers: list[bool] = []
     cancelled = {"value": False}
-    position = {"i": 0}
+    position = {"i": 0, "armed": False, "held": set(), "focused": False}
     # When the caller moves the map, keep this bar out of the way.
     map_review = on_show is not None
 
@@ -488,17 +494,12 @@ def review_corrections(
     root.protocol("WM_DELETE_WINDOW", close_cancelled)
 
     def choose(accept: bool):
-        # Enter and Space can be delivered twice (key plus a focused control).
-        # The second delivery must not move on to the next dangling end.
-        if not claim_choice(position):
-            return
         answers.append(accept)
         position["i"] += 1
         if position["i"] >= len(corrections):
             root.quit()
             return
         show()
-        root.after(300, lambda: release_choice(position))
 
     def on_key(event):
         if event.keysym == "Escape":
@@ -506,8 +507,16 @@ def review_corrections(
             return "break"
         decision = decision_for_key(event.keysym)
         if decision is None:
-            return None
+            return "break"
+        # A held or repeated key must not walk through every end on its own.
+        if not accept_prompt_key(position, event.keysym):
+            return "break"
         choose(decision)
+        return "break"
+
+    def on_release(event):
+        if decision_for_key(event.keysym) is not None:
+            release_prompt_key(position, event.keysym)
         return "break"
 
     def choice_label(text, color, accept):
@@ -522,12 +531,19 @@ def review_corrections(
             cursor="hand2",
         )
         label.pack(side="left", expand=True, fill="x", padx=(0 if accept else 8, 8 if accept else 0))
-        label.bind("<Button-1>", lambda _event: choose(accept))
+        label.bind("<Button-1>", lambda _event: on_key_click(accept))
         return label
+
+    def on_key_click(accept: bool):
+        if not position.get("armed"):
+            return
+        position["armed"] = False
+        choose(accept)
 
     choice_label("Accept   Enter", "#1b8a3e", True)
     choice_label("Reject   Space", "#d1242f", False)
     root.bind("<KeyPress>", on_key)
+    root.bind("<KeyRelease>", on_release)
 
     def place_bar():
         root.update_idletasks()
@@ -552,7 +568,9 @@ def review_corrections(
                 f"Gap {correction.gap:.2f}{unit_text}"
             )
         )
-        root.withdraw()
+        # Stay disarmed while the map moves. A key delivered during that
+        # update must not open the next prompt.
+        position["armed"] = False
         root.update_idletasks()
         if on_show:
             on_show(correction)
@@ -566,10 +584,17 @@ def review_corrections(
                 os.unlink(handle.name)
             holder["photo"] = photo
             image_label.configure(image=photo)
-        root.deiconify()
         place_bar()
-        root.lift()
-        root.focus_force()
+        # Focus once. Focusing again on every end replays Enter and runs ahead.
+        if not position["focused"]:
+            try:
+                root.lift()
+                root.focus_set()
+            except tk.TclError:
+                pass
+            position["focused"] = True
+        if not position["held"].intersection(("Return", "KP_Enter", "space")):
+            position["armed"] = True
 
     show()
     root.mainloop()
